@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ProsodyEdit</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div>
+          <h1>ProsodyEdit</h1>
+          <p>Sentence replacement workflow for slowed CosyVoice edits.</p>
+        </div>
+        <div class="status" id="status">Idle</div>
+      </header>
+
+      <section class="band controls">
+        <div class="field wide">
+          <label for="inputDir">Input directory</label>
+          <input id="inputDir" type="text" placeholder="/absolute/path/to/input">
+        </div>
+        <div class="field wide">
+          <label for="outputDir">Output directory</label>
+          <input id="outputDir" type="text" placeholder="/absolute/path/to/output">
+        </div>
+        <button id="saveDirsBtn" type="button">Save folders</button>
+      </section>
+
+      <section class="band controls import-controls">
+        <div class="field wide">
+          <label for="wavPath">WAV filename or path inside the input directory</label>
+          <input id="wavPath" type="text" placeholder="audio.wav">
+        </div>
+        <div class="field">
+          <label for="episodeName">Episode name</label>
+          <input id="episodeName" type="text" placeholder="optional">
+        </div>
+        <button id="importBtn" type="button">Import WAV</button>
+      </section>
+
+      <section class="workspace">
+        <aside class="sidebar">
+          <div class="panel">
+            <h2>Episodes</h2>
+            <div id="episodeList" class="episode-list"></div>
+          </div>
+          <div class="panel">
+            <h2>Settings</h2>
+            <dl id="settings" class="settings"></dl>
+          </div>
+        </aside>
+
+        <section class="editor">
+          <div class="toolbar">
+            <div>
+              <h2 id="episodeTitle">No episode selected</h2>
+              <p id="episodeMeta">Import a WAV or choose an existing episode.</p>
+              <p id="selectionMeta" class="selection-meta"></p>
+            </div>
+            <div class="actions">
+              <button id="transcribeBtn" type="button" disabled>Transcribe</button>
+              <button id="generateBtn" type="button" disabled>Generate Selected</button>
+              <button id="spliceBtn" type="button" disabled>Splice Final WAV</button>
+              <button id="runAllBtn" type="button" disabled>Run All</button>
+            </div>
+          </div>
+
+          <div class="audio-row" id="audioRow" hidden>
+            <div>
+              <label>Original</label>
+              <audio id="originalAudio" controls></audio>
+            </div>
+            <div>
+              <label>Final WAV</label>
+              <audio id="finalAudio" controls></audio>
+              <a id="finalLink" href="#" target="_blank" rel="noreferrer"></a>
+            </div>
+          </div>
+
+          <div class="sentence-table">
+            <div class="table-head">
+              <span>Select</span>
+              <span>#</span>
+              <span>Time</span>
+              <span>Sentence</span>
+              <span>Original</span>
+              <span>Generated</span>
+            </div>
+            <div id="sentences" class="sentences empty">No transcript loaded.</div>
+          </div>
+        </section>
+      </section>
+
+      <section class="band log-wrap">
+        <div class="log-head">
+          <h2>Logs</h2>
+          <button id="clearLogBtn" type="button">Clear</button>
+        </div>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

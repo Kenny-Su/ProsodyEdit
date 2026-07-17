@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local source and generated audio
+*.mp3
+*.wav
+*.flac
+*.m4a
+
+# Per-machine GUI configuration
+prosody_gui/config.json

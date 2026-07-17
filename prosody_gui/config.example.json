@@ -1,0 +1,15 @@
+{
+  "input_dir": "~/Downloads/ProsodyEdit-audio",
+  "output_dir": "~/Downloads/ProsodyEdit-output",
+  "whisperx_model": "small",
+  "whisperx_device": "cpu",
+  "whisperx_compute_type": "int8",
+  "whisperx_batch_size": 8,
+  "speed": 0.95,
+  "crossfade": 0.15,
+  "silence_threshold_db": -50.0,
+  "min_silence": 0.05,
+  "min_sound": 0.1,
+  "gain_clamp_db": 3.0,
+  "enable_gain_ramp": false
+}
