@@ -1,24 +1,46 @@
 from __future__ import annotations
 
 import json
+import gc
 import math
 import os
 import re
 import shutil
-import struct
 import subprocess
-import tempfile
-import wave
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
-from .config import ROOT, AppConfig
+from .config import AppConfig
 
 
 LogFn = Callable[[str], None]
 OUTPUT_DIR = Path.home() / "Downloads" / "ProsodyEdit-output"
+TRANSCRIPTS: dict[str, Any] = {}
+_QWEN_MODEL: Any = None
+_QWEN_MODEL_KEY: tuple[str, str, str, int] | None = None
+_MPS_DISABLED_REASON: str | None = None
+
+# Must be set before the lazy torch import performed during transcription.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+SENTENCE_END_RE = re.compile(r"[.!?。！？][\"'”’）】》]*$")
+NO_LEADING_SPACE_RE = re.compile(r"^[,.;:!?%。，、；：！？）】》”’]")
+NO_TRAILING_SPACE_RE = re.compile(r"[（【《“‘/]$")
+CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
+@dataclass
+class Word:
+    index: int
+    sentence_index: int
+    sentence_word_index: int
+    start: float
+    end: float
+    text: str
+    score: float | None = None
+    word_audio: str | None = None
 
 
 @dataclass
@@ -27,9 +49,8 @@ class Sentence:
     start: float
     end: float
     text: str
+    words: list[Word] = field(default_factory=list)
     sentence_audio: str | None = None
-    generated_audio: str | None = None
-    trimmed_audio: str | None = None
 
 
 def safe_name(name: str) -> str:
@@ -45,6 +66,17 @@ def configure_output_dir(path: str | Path) -> Path:
         raise NotADirectoryError(output)
     OUTPUT_DIR = output
     return output
+
+
+def reset_workspace() -> None:
+    TRANSCRIPTS.clear()
+    if not OUTPUT_DIR.exists():
+        return
+    for path in OUTPUT_DIR.iterdir():
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
 
 
 def rel(path: Path) -> str:
@@ -70,16 +102,24 @@ def original_wav(ep_dir: Path) -> Path:
     return ep_dir / "original.wav"
 
 
-def transcript_json(ep_dir: Path) -> Path:
-    return ep_dir / "original.json"
+def episode_metadata_json(ep_dir: Path) -> Path:
+    return ep_dir / "episode.json"
 
 
 def sentences_dir(ep_dir: Path) -> Path:
     return ep_dir / "sentences"
 
 
-def generated_dir(ep_dir: Path) -> Path:
-    return ep_dir / "generated"
+def words_dir(ep_dir: Path) -> Path:
+    return ep_dir / "words"
+
+
+def edited_wav(ep_dir: Path) -> Path:
+    return ep_dir / "edited.wav"
+
+
+def word_file_stem(index: int) -> str:
+    return f"word_{index:04d}"
 
 
 def run_command(
@@ -89,10 +129,12 @@ def run_command(
     env: dict[str, str] | None = None,
 ) -> None:
     log("$ " + " ".join(args))
+    run_env = os.environ.copy() if env is None else env
+    run_env.setdefault("PYTHONUNBUFFERED", "1")
     proc = subprocess.Popen(
         args,
         cwd=str(cwd) if cwd else None,
-        env=env,
+        env=run_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -110,24 +152,12 @@ def ffmpeg(config: AppConfig, args: list[str], log: LogFn) -> None:
     run_command([config.ffmpeg, "-hide_banner", "-y", *args], log)
 
 
-def ffprobe_duration(config: AppConfig, path: Path) -> float:
-    out = subprocess.check_output(
-        [
-            config.ffprobe,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        text=True,
-    ).strip()
-    return float(out)
-
-
-def import_wav(source: Path, requested_name: str | None, log: LogFn) -> dict:
+def import_wav(
+    source: Path,
+    requested_name: str | None,
+    log: LogFn,
+    display_name: str | None = None,
+) -> dict:
     if source.suffix.lower() != ".wav":
         raise ValueError("Input must be a .wav file.")
     if not source.exists():
@@ -136,109 +166,238 @@ def import_wav(source: Path, requested_name: str | None, log: LogFn) -> dict:
     ep_dir = episode_dir(name)
     ep_dir.mkdir(parents=True, exist_ok=True)
     sentences_dir(ep_dir).mkdir(exist_ok=True)
-    generated_dir(ep_dir).mkdir(exist_ok=True)
+    words_dir(ep_dir).mkdir(exist_ok=True)
     dest = original_wav(ep_dir)
     if source.resolve() != dest.resolve():
         shutil.copy2(source, dest)
+    visible_name = (display_name or requested_name or source.stem).strip() or name
+    episode_metadata_json(ep_dir).write_text(
+        json.dumps({"display_name": visible_name}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     log(f"Imported WAV into {rel(dest)}.")
     return get_episode(name)
 
 
-def parse_sentences(ep_dir: Path) -> list[Sentence]:
-    path = transcript_json(ep_dir)
-    if not path.exists():
+def set_transcript(name: str, result: Any) -> None:
+    TRANSCRIPTS[safe_name(name)] = result
+
+
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def timestamp_items(result: Any) -> list[Any]:
+    timestamps = _field(result, "time_stamps")
+    if timestamps is None:
         return []
-    data = json.loads(path.read_text(encoding="utf-8"))
+    items = getattr(timestamps, "items", None)
+    if items is not None and not callable(items):
+        return list(items)
+    if isinstance(timestamps, dict):
+        raw = timestamps.get("items", [])
+        return list(raw) if isinstance(raw, (list, tuple)) else []
+    if isinstance(timestamps, (list, tuple)):
+        if len(timestamps) == 1 and hasattr(timestamps[0], "items"):
+            return list(timestamps[0].items)
+        return list(timestamps)
+    try:
+        return list(timestamps)
+    except TypeError:
+        return []
+
+
+def join_units(units: Iterable[str]) -> str:
+    text = ""
+    for raw in units:
+        unit = raw.strip()
+        if not unit:
+            continue
+        if not text:
+            text = unit
+        elif NO_LEADING_SPACE_RE.search(unit) or NO_TRAILING_SPACE_RE.search(text):
+            text += unit
+        elif CJK_RE.search(unit) or CJK_RE.search(text[-1:]):
+            text += unit
+        else:
+            text += " " + unit
+    return text
+
+
+def _timed_units(result: Any) -> list[tuple[str, float, float]]:
+    units: list[tuple[str, float, float]] = []
+    for item in timestamp_items(result):
+        text = str(_field(item, "text", "") or "").strip()
+        try:
+            start = float(_field(item, "start_time"))
+            end = float(_field(item, "end_time"))
+        except (TypeError, ValueError):
+            continue
+        if not text or not math.isfinite(start) or not math.isfinite(end):
+            continue
+        if start < 0 or end <= start:
+            continue
+        units.append((text, start, end))
+    return units
+
+
+def parse_sentences(ep_dir: Path) -> list[Sentence]:
+    result = TRANSCRIPTS.get(ep_dir.name)
+    if result is None:
+        return []
     sentences: list[Sentence] = []
-    for idx, segment in enumerate(data.get("segments", []), 1):
+    word_index = 0
+    grouped: list[list[tuple[str, float, float]]] = []
+    pending: list[tuple[str, float, float]] = []
+    for unit in _timed_units(result):
+        pending.append(unit)
+        if SENTENCE_END_RE.search(unit[0]):
+            grouped.append(pending)
+            pending = []
+    if pending:
+        grouped.append(pending)
+
+    for idx, group in enumerate(grouped, 1):
+        words: list[Word] = []
+        for sentence_word_index, (text, start, end) in enumerate(group, 1):
+            word_index += 1
+            stem = word_file_stem(word_index)
+            word_wav = words_dir(ep_dir) / f"{stem}.wav"
+            words.append(
+                Word(
+                    index=word_index,
+                    sentence_index=idx,
+                    sentence_word_index=sentence_word_index,
+                    start=start,
+                    end=end,
+                    text=text,
+                    word_audio=rel(word_wav) if word_wav.exists() else None,
+                )
+            )
         sentence_wav = sentences_dir(ep_dir) / f"sentence_{idx:02d}.wav"
-        gen_wav = generated_dir(ep_dir) / f"sentence_{idx:02d}_slowdown.wav"
-        trimmed_wav = generated_dir(ep_dir) / f"sentence_{idx:02d}_slowdown_trimmed.wav"
         sentences.append(
             Sentence(
                 index=idx,
-                start=float(segment["start"]),
-                end=float(segment["end"]),
-                text=str(segment.get("text", "")).strip(),
+                start=group[0][1],
+                end=group[-1][2],
+                text=join_units(unit[0] for unit in group),
+                words=words,
                 sentence_audio=rel(sentence_wav) if sentence_wav.exists() else None,
-                generated_audio=rel(gen_wav) if gen_wav.exists() else None,
-                trimmed_audio=rel(trimmed_wav) if trimmed_wav.exists() else None,
             )
         )
     return sentences
 
 
+def parse_words(ep_dir: Path) -> list[Word]:
+    return [word for sentence in parse_sentences(ep_dir) for word in sentence.words]
+
+
 def get_episode(name: str) -> dict:
     ep_dir = display_episode_dir(name)
-    final_files = sorted(
-        generated_dir(ep_dir).glob("original_with_sentence_*_slowdown*.wav"),
-        key=lambda path: path.stat().st_mtime,
-    )
+    sentences = parse_sentences(ep_dir)
+    display_name = ep_dir.name
+    metadata_path = episode_metadata_json(ep_dir)
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        display_name = str(metadata.get("display_name") or display_name)
+    edited = edited_wav(ep_dir)
     return {
         "name": ep_dir.name,
+        "display_name": display_name,
         "path": rel(ep_dir) if ep_dir.exists() else None,
         "original": rel(original_wav(ep_dir)) if original_wav(ep_dir).exists() else None,
-        "transcript": rel(transcript_json(ep_dir)) if transcript_json(ep_dir).exists() else None,
-        "sentences": [asdict(s) for s in parse_sentences(ep_dir)],
-        "final": rel(final_files[-1]) if final_files else None,
+        "edited": rel(edited) if edited.exists() else None,
+        "edited_version": edited.stat().st_mtime_ns if edited.exists() else None,
+        "transcript": ep_dir.name in TRANSCRIPTS,
+        "sentences": [asdict(sentence) for sentence in sentences],
+        "word_count": sum(len(sentence.words) for sentence in sentences),
     }
 
 
-def list_episodes() -> list[dict]:
-    items: list[dict] = []
-    if OUTPUT_DIR.exists():
-        for path in sorted(OUTPUT_DIR.iterdir()):
-            if path.is_dir() and (original_wav(path).exists() or transcript_json(path).exists()):
-                items.append(get_episode(path.name))
-    return items
+def _clear_qwen_model() -> None:
+    global _QWEN_MODEL, _QWEN_MODEL_KEY
+    _QWEN_MODEL = None
+    _QWEN_MODEL_KEY = None
+    gc.collect()
+    try:
+        import torch
+
+        torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
+def _load_qwen_model(config: AppConfig, device: str, log: LogFn) -> Any:
+    global _QWEN_MODEL, _QWEN_MODEL_KEY
+    key = (config.qwen_asr_model, config.qwen_aligner_model, device, config.qwen_max_new_tokens)
+    if _QWEN_MODEL is not None and _QWEN_MODEL_KEY == key:
+        return _QWEN_MODEL
+    _clear_qwen_model()
+    import torch
+    from qwen_asr import Qwen3ASRModel
+
+    if device == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("MPS is not available in this PyTorch runtime")
+    dtype = torch.float16 if device == "mps" else torch.float32
+    log(f"Loading Qwen3-ASR and forced aligner on {device}.")
+    _QWEN_MODEL = Qwen3ASRModel.from_pretrained(
+        config.qwen_asr_model,
+        dtype=dtype,
+        device_map=device,
+        max_inference_batch_size=1,
+        max_new_tokens=config.qwen_max_new_tokens,
+        forced_aligner=config.qwen_aligner_model,
+        forced_aligner_kwargs={"dtype": dtype, "device_map": device},
+    )
+    _QWEN_MODEL_KEY = key
+    return _QWEN_MODEL
+
+
+def _transcribe_native(wav: Path, config: AppConfig, device: str, log: LogFn) -> Any:
+    model = _load_qwen_model(config, device, log)
+    return model.transcribe(
+        audio=str(wav),
+        language=config.qwen_language or None,
+        return_time_stamps=True,
+    )[0]
 
 
 def transcribe_episode(name: str, config: AppConfig, log: LogFn) -> dict:
+    global _MPS_DISABLED_REASON
     ep_dir = display_episode_dir(name)
     wav = original_wav(ep_dir)
     if not wav.exists():
         raise FileNotFoundError(wav)
-    args = [
-        config.whisperx_python,
-        str(ROOT / "whisperx" / "whisperx" / "__main__.py"),
-        str(wav),
-        "--model",
-        config.whisperx_model,
-        "--device",
-        config.whisperx_device,
-        "--compute_type",
-        config.whisperx_compute_type,
-        "--batch_size",
-        str(config.whisperx_batch_size),
-        "--segment_resolution",
-        "sentence",
-        "--output_format",
-        "json",
-        "--output_dir",
-        str(ep_dir),
-        "--print_progress",
-        "True",
-    ]
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(ROOT / "whisperx")
-    run_command(args, log, cwd=ROOT, env=env)
-    candidate = ep_dir / f"{wav.stem}.json"
-    if candidate.exists() and candidate != transcript_json(ep_dir):
-        candidate.replace(transcript_json(ep_dir))
-    if not transcript_json(ep_dir).exists():
-        raise RuntimeError("WhisperX did not produce original.json.")
-    log(f"Transcript ready: {rel(transcript_json(ep_dir))}.")
-    cut_sentences(name, config, log)
+    device = config.qwen_device
+    if device == "mps" and _MPS_DISABLED_REASON:
+        log(f"MPS was disabled after an earlier failure: {_MPS_DISABLED_REASON}")
+        device = "cpu"
+    try:
+        result = _transcribe_native(wav, config, device, log)
+    except (RuntimeError, NotImplementedError) as exc:
+        if device != "mps":
+            raise
+        _MPS_DISABLED_REASON = str(exc)
+        log(f"MPS inference failed: {exc}")
+        log("Retrying the complete transcription on CPU with float32.")
+        _clear_qwen_model()
+        result = _transcribe_native(wav, config, "cpu", log)
+    edited_wav(ep_dir).unlink(missing_ok=True)
+    set_transcript(name, result)
+    log(f"Transcript ready in memory ({len(timestamp_items(result))} timed units).")
+    cut_transcript_audio(name, config, log)
     return get_episode(name)
 
 
-def cut_sentences(name: str, config: AppConfig, log: LogFn) -> dict:
+def cut_transcript_audio(name: str, config: AppConfig, log: LogFn) -> dict:
     ep_dir = display_episode_dir(name)
     wav = original_wav(ep_dir)
-    out_dir = sentences_dir(ep_dir)
-    out_dir.mkdir(exist_ok=True)
+    sentences_dir(ep_dir).mkdir(exist_ok=True)
+    words_dir(ep_dir).mkdir(exist_ok=True)
     for sentence in parse_sentences(ep_dir):
-        out = out_dir / f"sentence_{sentence.index:02d}.wav"
+        out = sentences_dir(ep_dir) / f"sentence_{sentence.index:02d}.wav"
         duration = max(0.01, sentence.end - sentence.start)
         ffmpeg(
             config,
@@ -255,290 +414,89 @@ def cut_sentences(name: str, config: AppConfig, log: LogFn) -> dict:
             ],
             log,
         )
-    log("Sentence WAV files are ready.")
-    return get_episode(name)
-
-
-def generate_selected(name: str, ids: Iterable[int], config: AppConfig, log: LogFn) -> dict:
-    ep_dir = display_episode_dir(name)
-    selected = {int(i) for i in ids}
-    if not selected:
-        raise ValueError("Select at least one sentence.")
-    if not parse_sentences(ep_dir):
-        raise RuntimeError("Transcript is missing. Run transcription first.")
-    cut_sentences(name, config, log)
-    for sentence in parse_sentences(ep_dir):
-        if sentence.index not in selected:
-            continue
-        prompt = sentences_dir(ep_dir) / f"sentence_{sentence.index:02d}.wav"
-        raw = generated_dir(ep_dir) / f"sentence_{sentence.index:02d}_slowdown.wav"
-        args = [
-            config.cosyvoice_python,
-            str(Path(__file__).resolve().parent / "cosyvoice_generate.py"),
-            "--model-dir",
-            config.cosyvoice_model_dir,
-            "--text",
-            sentence.text,
-            "--prompt-text",
-            f"You are a helpful assistant.<|endofprompt|>{sentence.text}",
-            "--prompt-wav",
-            str(prompt),
-            "--output",
-            str(raw),
-            "--speed",
-            str(config.speed),
-        ]
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(ROOT / "CosyVoice")
-        run_command(args, log, cwd=ROOT / "CosyVoice", env=env)
-        trim_and_match_sentence(ep_dir, sentence.index, config, log)
-    return get_episode(name)
-
-
-def measure_mean_volume(path: Path, config: AppConfig, log: LogFn) -> float:
-    proc = subprocess.run(
-        [config.ffmpeg, "-hide_banner", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    for line in proc.stdout.splitlines():
-        if "mean_volume:" in line:
-            match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB", line)
-            if match:
-                value = float(match.group(1))
-                log(f"{path.name} mean volume: {value:.1f} dB")
-                return value
-    raise RuntimeError(f"Could not measure mean volume for {path}")
-
-
-def trim_and_match_sentence(ep_dir: Path, index: int, config: AppConfig, log: LogFn) -> Path:
-    source_sentence = sentences_dir(ep_dir) / f"sentence_{index:02d}.wav"
-    raw = generated_dir(ep_dir) / f"sentence_{index:02d}_slowdown.wav"
-    pcm = generated_dir(ep_dir) / f"sentence_{index:02d}_slowdown_pcm.wav"
-    trimmed = generated_dir(ep_dir) / f"sentence_{index:02d}_slowdown_trimmed.wav"
-    matched = generated_dir(ep_dir) / f"sentence_{index:02d}_slowdown_matched.wav"
-    if not source_sentence.exists():
-        raise FileNotFoundError(
-            f"Sentence audio is missing for sentence {index:02d}: {rel(source_sentence)}. "
-            "Run Transcribe first so sentence clips are cut."
-        )
-    if not raw.exists():
-        raise FileNotFoundError(
-            f"Generated replacement is missing for sentence {index:02d}: {rel(raw)}. "
-            "Run Generate Selected before splicing."
-        )
-    ffmpeg(config, ["-i", str(raw), "-c:a", "pcm_s16le", str(pcm)], log)
-    trim_wav_edges(pcm, trimmed, config.silence_threshold_db, config.min_sound, config.min_silence, log)
-    original_mean = measure_mean_volume(source_sentence, config, log)
-    generated_mean = measure_mean_volume(trimmed, config, log)
-    gain = max(-config.gain_clamp_db, min(config.gain_clamp_db, original_mean - generated_mean))
-    log(f"Applying {gain:+.1f} dB gain to sentence {index:02d}.")
-    ffmpeg(config, ["-i", str(trimmed), "-af", f"volume={gain:.3f}dB", "-c:a", "pcm_s16le", str(matched)], log)
-    shutil.copy2(matched, trimmed)
-    return trimmed
-
-
-def trim_wav_edges(
-    source: Path,
-    dest: Path,
-    threshold_db: float,
-    min_sound: float,
-    min_silence: float,
-    log: LogFn,
-) -> None:
-    with wave.open(str(source), "rb") as reader:
-        params = reader.getparams()
-        frames = reader.readframes(params.nframes)
-    if params.sampwidth != 2:
-        raise RuntimeError(f"Expected 16-bit PCM WAV for trimming: {source}")
-    frame_width = params.nchannels * params.sampwidth
-    threshold = 32767 * math.pow(10.0, threshold_db / 20.0)
-    total_frames = params.nframes
-    window_frames = max(1, int(params.framerate * 0.01))
-    min_sound_frames = max(1, int(params.framerate * min_sound))
-    min_silence_frames = max(1, int(params.framerate * min_silence))
-
-    def window_rms(start_frame: int, end_frame: int) -> float:
-        start = start_frame * frame_width
-        end = end_frame * frame_width
-        chunk = frames[start:end]
-        if not chunk:
-            return 0.0
-        sample_count = len(chunk) // params.sampwidth
-        samples = struct.unpack("<" + "h" * sample_count, chunk)
-        return math.sqrt(sum(sample * sample for sample in samples) / max(1, sample_count))
-
-    def window_is_sound(start_frame: int, end_frame: int) -> bool:
-        return window_rms(start_frame, end_frame) > threshold
-
-    def has_sustained_sound(start_frame: int, step: int) -> bool:
-        end_frame = min(total_frames, start_frame + min_sound_frames)
-        if step < 0:
-            end_frame = start_frame
-            start_frame = max(0, end_frame - min_sound_frames)
-        sound_frames = 0
-        frame = start_frame
-        while frame < end_frame:
-            next_frame = min(end_frame, frame + window_frames)
-            if window_is_sound(frame, next_frame):
-                sound_frames += next_frame - frame
-            frame = next_frame
-        return sound_frames >= min_sound_frames
-
-    first = 0
-    while first < total_frames:
-        end = min(total_frames, first + window_frames)
-        if window_is_sound(first, end) and has_sustained_sound(first, 1):
-            break
-        first = end
-    last = total_frames - 1
-    while last >= first:
-        start = max(first, last - window_frames + 1)
-        if window_is_sound(start, last + 1) and has_sustained_sound(last + 1, -1):
-            break
-        last = start - 1
-
-    while first > 0:
-        prev = max(0, first - min_silence_frames)
-        if window_rms(prev, first) <= threshold:
-            break
-        first = prev
-
-    while last < total_frames - 1:
-        next_last = min(total_frames - 1, last + min_silence_frames)
-        if window_rms(last + 1, next_last + 1) <= threshold:
-            break
-        last = next_last
-
-    if first >= total_frames or last < first:
-        first, last = 0, total_frames - 1
-    start_byte = first * frame_width
-    end_byte = (last + 1) * frame_width
-    with wave.open(str(dest), "wb") as writer:
-        writer.setparams(params)
-        writer.writeframes(frames[start_byte:end_byte])
-    original_duration = total_frames / params.framerate
-    trimmed_duration = (last - first + 1) / params.framerate
-    log(f"Trimmed {source.name}: {original_duration:.3f}s -> {trimmed_duration:.3f}s.")
-
-
-def selected_output_name(ids: list[int]) -> str:
-    joined = "_and_".join(f"{i:02d}" for i in ids)
-    return f"original_with_sentence_{joined}_slowdown_crossfade.wav"
-
-
-def splice_episode(name: str, ids: Iterable[int], config: AppConfig, log: LogFn) -> dict:
-    ep_dir = display_episode_dir(name)
-    selected = sorted({int(i) for i in ids})
-    if not selected:
-        raise ValueError("Select at least one sentence.")
-    sentences = parse_sentences(ep_dir)
-    by_id = {s.index: s for s in sentences}
-    for idx in selected:
-        if idx not in by_id:
-            raise ValueError(f"Sentence {idx} is not in the transcript.")
-        raw = generated_dir(ep_dir) / f"sentence_{idx:02d}_slowdown.wav"
-        if not raw.exists():
-            raise FileNotFoundError(
-                f"Generated replacement is missing for sentence {idx:02d}: {rel(raw)}. "
-                "Run Generate Selected first, then Splice Final WAV."
+        for word in sentence.words:
+            word_out = words_dir(ep_dir) / f"{word_file_stem(word.index)}.wav"
+            word_duration = max(0.01, word.end - word.start)
+            ffmpeg(
+                config,
+                [
+                    "-ss",
+                    f"{word.start:.3f}",
+                    "-t",
+                    f"{word_duration:.3f}",
+                    "-i",
+                    str(wav),
+                    "-c:a",
+                    "pcm_s16le",
+                    str(word_out),
+                ],
+                log,
             )
-        trim_and_match_sentence(ep_dir, idx, config, log)
-
-    wav = original_wav(ep_dir)
-    out_dir = generated_dir(ep_dir)
-    out_dir.mkdir(exist_ok=True)
-    final = out_dir / selected_output_name(selected)
-    duration = ffprobe_duration(config, wav)
-    xfade = max(0.0, float(config.crossfade))
-
-    with tempfile.TemporaryDirectory(prefix="prosody_splice_") as temp_name:
-        temp = Path(temp_name)
-        clips: list[Path] = []
-        cursor = 0.0
-        for idx in selected:
-            sentence = by_id[idx]
-            prev_end = by_id[idx - 1].end if idx - 1 in by_id else sentence.start
-            next_start = by_id[idx + 1].start if idx + 1 in by_id else sentence.end
-            if idx == 1 and cursor == 0.0:
-                left_end = cursor
-            else:
-                left_end = min(duration, max(cursor, prev_end + xfade))
-            if idx == len(sentences):
-                right_start = duration
-            else:
-                right_start = min(duration, max(0.0, next_start - xfade))
-            if left_end > cursor + 0.005:
-                clip = temp / f"clip_{len(clips):03d}_original.wav"
-                extract_original_span(wav, cursor, left_end, clip, config, log)
-                clips.append(clip)
-            replacement = generated_dir(ep_dir) / f"sentence_{idx:02d}_slowdown_trimmed.wav"
-            clips.append(replacement)
-            cursor = max(cursor, right_start)
-        if cursor < duration - 0.005:
-            clip = temp / f"clip_{len(clips):03d}_original.wav"
-            extract_original_span(wav, cursor, duration, clip, config, log)
-            clips.append(clip)
-        joined = join_with_crossfades(clips, final, xfade, config, log, temp)
-        log(f"Final WAV ready: {rel(joined)}")
+    log("Sentence and word preview WAV files are ready.")
     return get_episode(name)
 
 
-def extract_original_span(source: Path, start: float, end: float, out: Path, config: AppConfig, log: LogFn) -> None:
-    duration = max(0.01, end - start)
+def slow_words(name: str, word_ids: Iterable[int], speed: float, config: AppConfig, log: LogFn) -> dict:
+    if not math.isfinite(speed) or not 0.5 <= speed < 1.0:
+        raise ValueError("Speed must be at least 0.50 and less than 1.00.")
+    ep_dir = display_episode_dir(name)
+    wav = original_wav(ep_dir)
+    if not wav.exists():
+        raise FileNotFoundError(wav)
+    available = {word.index: word for word in parse_words(ep_dir)}
+    requested = sorted(set(int(word_id) for word_id in word_ids))
+    if not requested:
+        raise ValueError("Select at least one word to slow down.")
+    missing = [word_id for word_id in requested if word_id not in available]
+    if missing:
+        raise ValueError(f"Unknown word indexes: {', '.join(map(str, missing))}.")
+    selected_words = [available[word_id] for word_id in requested]
+    groups: list[list[Word]] = []
+    for word in selected_words:
+        if groups and word.index == groups[-1][-1].index + 1:
+            groups[-1].append(word)
+        else:
+            groups.append([word])
+    chunks = [(group[0].start, group[-1].end) for group in groups]
+    for previous, current in zip(chunks, chunks[1:]):
+        if current[0] < previous[1]:
+            raise ValueError("Selected word intervals overlap.")
+
+    filters: list[str] = []
+    labels: list[str] = []
+    cursor = 0.0
+
+    def add_segment(expression: str) -> None:
+        label = f"part{len(labels)}"
+        filters.append(f"[0:a]{expression},asetpts=PTS-STARTPTS[{label}]")
+        labels.append(f"[{label}]")
+
+    for start, end in chunks:
+        if start > cursor + 0.000001:
+            add_segment(f"atrim=start={cursor:.6f}:end={start:.6f}")
+        add_segment(f"atrim=start={start:.6f}:end={end:.6f},atempo={speed:.6f}")
+        cursor = end
+    add_segment(f"atrim=start={cursor:.6f}")
+    output = edited_wav(ep_dir)
+    filter_complex = ";".join(filters + [f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[out]"])
+    log(
+        f"Slowing {len(selected_words)} selected word(s) in "
+        f"{len(chunks)} contiguous chunk(s) to {speed:.2f}x."
+    )
     ffmpeg(
         config,
-        ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source), "-c:a", "pcm_s16le", str(out)],
+        [
+            "-i",
+            str(wav),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[out]",
+            "-c:a",
+            "pcm_s16le",
+            str(output),
+        ],
         log,
     )
-
-
-def join_with_crossfades(
-    clips: list[Path],
-    final: Path,
-    xfade: float,
-    config: AppConfig,
-    log: LogFn,
-    temp: Path,
-) -> Path:
-    if not clips:
-        raise RuntimeError("No clips to join.")
-    if len(clips) == 1:
-        shutil.copy2(clips[0], final)
-        return final
-    current = clips[0]
-    for i, clip in enumerate(clips[1:], 1):
-        out = final if i == len(clips) - 1 else temp / f"join_{i:03d}.wav"
-        duration_a = ffprobe_duration(config, current)
-        duration_b = ffprobe_duration(config, clip)
-        effective = min(xfade, max(0.01, duration_a / 4), max(0.01, duration_b / 4))
-        ffmpeg(
-            config,
-            [
-                "-i",
-                str(current),
-                "-i",
-                str(clip),
-                "-filter_complex",
-                f"[0:a][1:a]acrossfade=d={effective:.3f}:c1=tri:c2=tri[a]",
-                "-map",
-                "[a]",
-                "-c:a",
-                "pcm_s16le",
-                str(out),
-            ],
-            log,
-        )
-        current = out
-    return final
-
-
-def run_all(name: str, ids: Iterable[int], config: AppConfig, log: LogFn) -> dict:
-    if not transcript_json(display_episode_dir(name)).exists():
-        transcribe_episode(name, config, log)
-    else:
-        cut_sentences(name, config, log)
-    generate_selected(name, ids, config, log)
-    return splice_episode(name, ids, config, log)
+    log(f"Edited WAV ready: {rel(output)}.")
+    return get_episode(name)

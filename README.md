@@ -1,91 +1,94 @@
 # ProsodyEdit
 
-ProsodyEdit is a local GUI for transcribing audio with WhisperX and replacing
-selected sentences with CosyVoice-generated speech.
+ProsodyEdit is a local GUI for inspecting sentence- and word-level timestamps
+produced by Qwen3-ASR and Qwen3-ForcedAligner. Upload a WAV, transcribe it,
+inspect every timed unit, and click a tile to hear its exact aligned interval.
 
-## Clone
+## Requirements
 
-Clone with both source dependencies:
+- An Apple Silicon Mac. MPS is used by default, with a CPU fallback.
+- Python 3.12 for the model environment.
+- FFmpeg on `PATH`.
+- Enough free disk space and unified memory for the 1.7B ASR and 0.6B aligner
+  checkpoints. The first transcription downloads both models from Hugging Face.
+
+Install the system prerequisites with Homebrew:
 
 ```bash
-git clone --recurse-submodules <PROSODYEDIT_REPOSITORY_URL>
-cd ProsodyEdit
+brew install python@3.12 ffmpeg
 ```
 
-If the repository was cloned without submodules:
+## Model environment
+
+Create a dedicated environment for both the GUI server and Qwen inference.
 
 ```bash
-git submodule update --init --recursive
-```
-
-## Python environments
-
-Use Python 3.10 for CosyVoice:
-
-```bash
-python3.10 -m venv CosyVoice/.venv
-source CosyVoice/.venv/bin/activate
-python -m pip install --upgrade pip wheel
-python -m pip install "setuptools<81"
-python -m pip install -r CosyVoice/requirements.txt
-deactivate
-```
-
-Create a separate WhisperX environment:
-
-```bash
-python3.10 -m venv whisperx/.venv
-source whisperx/.venv/bin/activate
+python3.12 -m venv .venv
+source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ./whisperx
+python -m pip install --upgrade qwen-asr
 deactivate
 ```
 
-FFmpeg and FFprobe must also be available on `PATH`. On macOS with Homebrew:
-
-```bash
-brew install ffmpeg
-```
-
-## CosyVoice model
-
-Model weights are intentionally not stored in Git. Download
-`FunAudioLLM/Fun-CosyVoice3-0.5B-2512` into this exact directory:
-
-```text
-CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B/
-```
-
-Using ModelScope from the CosyVoice environment:
-
-```bash
-source CosyVoice/.venv/bin/activate
-python -c "from modelscope import snapshot_download; snapshot_download('FunAudioLLM/Fun-CosyVoice3-0.5B-2512', local_dir='CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B')"
-deactivate
-```
-
-The directory should contain files such as `llm.pt`, `flow.pt`, `hift.pt`,
-`speech_tokenizer_v3.onnx`, and `cosyvoice3.yaml`.
+Do not install the optional vLLM or FlashAttention packages on macOS; those
+paths target CUDA. Model weights are cached by Hugging Face and are not stored
+in this repository.
 
 ## Run
 
-The GUI server itself only uses the Python standard library:
-
 ```bash
-python3 run_gui.py
+.venv/bin/python run_gui.py
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
+You may also run `python run_gui.py`; the launcher detects an interpreter
+outside the project environment and restarts itself with `.venv/bin/python`.
 
-The first launch creates `prosody_gui/config.json`. This file is ignored
-because it contains machine-specific paths. Portable defaults resolve
-CosyVoice and WhisperX relative to the repository:
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765), upload a short WAV, and
+click **Transcribe**. This is also the recommended first-run smoke test before
+processing a long recording.
 
-```text
-CosyVoice/.venv/bin/python
-CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B
-whisperx/.venv/bin/python
-```
+The first launch creates the ignored `prosody_gui/config.json`. The server
+loads both models lazily on the first transcription and reuses them for later
+jobs. Defaults are:
 
-Input and output directories can be changed from the GUI. See
-`prosody_gui/config.example.json` for optional tuning settings.
+- ASR: `Qwen/Qwen3-ASR-1.7B`
+- Forced aligner: `Qwen/Qwen3-ForcedAligner-0.6B`
+- Device: MPS with unsupported-operation CPU fallback
+- Language: English; set `qwen_language` to an empty string for detection
+- Generation limit: 2048 tokens
+
+See `prosody_gui/config.example.json` for all settings. When MPS initialization
+or inference fails, ProsodyEdit logs the error, releases the MPS model, and
+retries the complete job on CPU with float32. CPU inference can be substantially
+slower.
+
+## Timestamp inspection
+
+Qwen's forced aligner supplies text, start time, and end time, but no alignment
+confidence. The GUI therefore reports timestamp coverage instead of inventing
+a score. It displays timestamps to millisecond precision and creates exact WAV
+previews for every sentence and timed unit.
+
+The native Qwen `ASRTranscription` and `ForcedAlignResult` objects remain in
+memory for the lifetime of the server. ProsodyEdit does not export or maintain
+a transcript JSON file. Uploading a new WAV or stopping the server discards the
+in-memory transcript.
+
+## Word-level slowdown
+
+After transcription, select any words with their checkboxes, choose a speed
+from `0.50` to `0.99`, and click **Create edited WAV**. ProsodyEdit applies
+FFmpeg `atempo` to every selected run and concatenates the result in timeline
+order. Consecutive selected words are merged from the first word's start to the
+last word's end, including their internal pauses. Nonconsecutive selections
+remain separate chunks, and all audio between those chunks is unchanged.
+The edited episode becomes longer by the added duration of the slowed words.
+
+Use the Edited player to review the result or click **Download WAV**. Creating
+another edit replaces the previous temporary `edited.wav`; the browser receives
+a cache-busted URL for the newest version.
+
+The official Qwen wrapper automatically splits long audio to the forced
+aligner's supported chunk length and restores absolute offsets when merging
+the results. Test a short recording first, then verify a recording longer than
+five minutes on the target machine before relying on a long batch.

@@ -1,6 +1,0 @@
-[submodule "CosyVoice"]
-	path = CosyVoice
-	url = https://github.com/FunAudioLLM/CosyVoice.git
-[submodule "whisperx"]
-	path = whisperx
-	url = https://github.com/m-bain/whisperx.git

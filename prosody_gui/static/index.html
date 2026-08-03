@@ -11,60 +11,43 @@
       <header class="topbar">
         <div>
           <h1>ProsodyEdit</h1>
-          <p>Sentence replacement workflow for slowed CosyVoice edits.</p>
+          <p>Inspect accurate per-word timestamps produced by Qwen3-ASR.</p>
         </div>
         <div class="status" id="status">Idle</div>
       </header>
 
-      <section class="band controls">
-        <div class="field wide">
-          <label for="inputDir">Input directory</label>
-          <input id="inputDir" type="text" placeholder="/absolute/path/to/input">
+      <section class="band upload-panel" id="uploadPanel">
+        <input id="wavFile" class="visually-hidden" type="file" accept=".wav,audio/wav" tabindex="-1" aria-hidden="true">
+        <div class="upload-mark" aria-hidden="true">↑</div>
+        <div class="upload-copy">
+          <h2>Start with a WAV file</h2>
+          <p id="uploadHint">Choose a file from your computer, or drag and drop it here.</p>
         </div>
-        <div class="field wide">
-          <label for="outputDir">Output directory</label>
-          <input id="outputDir" type="text" placeholder="/absolute/path/to/output">
-        </div>
-        <button id="saveDirsBtn" type="button">Save folders</button>
-      </section>
-
-      <section class="band controls import-controls">
-        <div class="field wide">
-          <label for="wavPath">WAV filename or path inside the input directory</label>
-          <input id="wavPath" type="text" placeholder="audio.wav">
-        </div>
-        <div class="field">
-          <label for="episodeName">Episode name</label>
-          <input id="episodeName" type="text" placeholder="optional">
-        </div>
-        <button id="importBtn" type="button">Import WAV</button>
+        <button id="chooseFileBtn" type="button" aria-describedby="uploadHint">Choose WAV file</button>
       </section>
 
       <section class="workspace">
-        <aside class="sidebar">
-          <div class="panel">
-            <h2>Episodes</h2>
-            <div id="episodeList" class="episode-list"></div>
-          </div>
-          <div class="panel">
-            <h2>Settings</h2>
-            <dl id="settings" class="settings"></dl>
-          </div>
-        </aside>
-
         <section class="editor">
           <div class="toolbar">
             <div>
-              <h2 id="episodeTitle">No episode selected</h2>
-              <p id="episodeMeta">Import a WAV or choose an existing episode.</p>
-              <p id="selectionMeta" class="selection-meta"></p>
+              <h2 id="episodeTitle">No audio uploaded</h2>
+              <p id="episodeMeta">Upload a WAV to begin.</p>
+              <p id="alignmentMeta" class="selection-meta"></p>
             </div>
             <div class="actions">
               <button id="transcribeBtn" type="button" disabled>Transcribe</button>
-              <button id="generateBtn" type="button" disabled>Generate Selected</button>
-              <button id="spliceBtn" type="button" disabled>Splice Final WAV</button>
-              <button id="runAllBtn" type="button" disabled>Run All</button>
             </div>
+          </div>
+
+          <div class="edit-toolbar" id="editToolbar" hidden>
+            <div>
+              <strong>Word slowdown</strong>
+              <span id="selectedWordCount">0 words selected</span>
+            </div>
+            <label>Speed
+              <input id="slowSpeed" type="number" min="0.50" max="0.99" step="0.01" value="0.95">
+            </label>
+            <button id="slowWordsBtn" type="button" disabled>Create edited WAV</button>
           </div>
 
           <div class="audio-row" id="audioRow" hidden>
@@ -72,21 +55,24 @@
               <label>Original</label>
               <audio id="originalAudio" controls></audio>
             </div>
-            <div>
-              <label>Final WAV</label>
-              <audio id="finalAudio" controls></audio>
-              <a id="finalLink" href="#" target="_blank" rel="noreferrer"></a>
+            <div id="editedAudioWrap" hidden>
+              <label>Edited</label>
+              <audio id="editedAudio" controls></audio>
+              <a id="downloadEdited" class="download-link" download="prosodyedit-slowed.wav">Download WAV</a>
             </div>
           </div>
 
-          <div class="sentence-table">
-            <div class="table-head">
-              <span>Select</span>
-              <span>#</span>
-              <span>Time</span>
-              <span>Sentence</span>
-              <span>Original</span>
-              <span>Generated</span>
+          <div class="transcript-editor">
+            <div class="transcript-head">
+              <div>
+                <h2>Transcript</h2>
+                <p>Select words with the checkboxes to slow them down. Use Play to hear each exact aligned interval.</p>
+              </div>
+              <div class="legend" aria-label="Word status legend">
+                <span><i class="legend-dot"></i>Aligned</span>
+                <span><i class="legend-dot selected"></i>Playing</span>
+                <span><i class="legend-dot ready"></i>Forced aligned</span>
+              </div>
             </div>
             <div id="sentences" class="sentences empty">No transcript loaded.</div>
           </div>

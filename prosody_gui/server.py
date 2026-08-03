@@ -2,20 +2,23 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import tempfile
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .config import STATIC_DIR, load_config, save_config
+from .config import STATIC_DIR, load_config
 from .jobs import Job, JobManager
 from . import pipeline
 
 
 CONFIG = load_config()
-pipeline.configure_output_dir(CONFIG.output_dir)
+WORKSPACE = tempfile.TemporaryDirectory(prefix="prosodyedit_workspace_")
+pipeline.configure_output_dir(WORKSPACE.name)
 JOBS = JobManager()
+CURRENT_EPISODE: str | None = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -30,11 +33,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(STATIC_DIR / path.removeprefix("/static/"))
         if path.startswith("/media/"):
             return self.send_media(path.removeprefix("/media/"))
-        if path == "/api/episodes":
-            return self.send_json({"episodes": pipeline.list_episodes(), "config": public_config()})
-        if path.startswith("/api/episode/"):
-            name = urllib.parse.unquote(path.removeprefix("/api/episode/"))
-            return self.send_json(pipeline.get_episode(name))
+        if path == "/api/current":
+            return self.send_json({"episode": current_episode(), "config": public_config()})
         if path.startswith("/api/jobs/") and path.endswith("/events"):
             job_id = path.split("/")[3]
             return self.send_events(job_id)
@@ -50,34 +50,29 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         try:
+            if path == "/api/upload-wav":
+                return self.upload_wav()
             payload = self.read_json()
-            if path == "/api/directories":
-                return self.update_directories(payload)
-            if path == "/api/import-wav":
-                source = resolve_input_path(payload.get("path", ""))
-                name = payload.get("name") or source.stem
-                job = JOBS.start("import-wav", lambda j: pipeline.import_wav(source, name, j.log))
-                return self.send_json(job_payload(job))
+            if JOBS.busy():
+                raise ValueError("Wait for the current operation to finish.")
             if path == "/api/transcribe":
                 name = require_name(payload)
                 job = JOBS.start("transcribe", lambda j: pipeline.transcribe_episode(name, CONFIG, j.log))
                 return self.send_json(job_payload(job))
-            if path == "/api/selection":
-                return self.send_json({"selected": selected_ids(payload)})
-            if path == "/api/generate":
+            if path == "/api/slow-words":
                 name = require_name(payload)
-                ids = selected_ids(payload)
-                job = JOBS.start("generate", lambda j: pipeline.generate_selected(name, ids, CONFIG, j.log))
-                return self.send_json(job_payload(job))
-            if path == "/api/splice":
-                name = require_name(payload)
-                ids = selected_ids(payload)
-                job = JOBS.start("splice", lambda j: pipeline.splice_episode(name, ids, CONFIG, j.log))
-                return self.send_json(job_payload(job))
-            if path == "/api/run-all":
-                name = require_name(payload)
-                ids = selected_ids(payload)
-                job = JOBS.start("run-all", lambda j: pipeline.run_all(name, ids, CONFIG, j.log))
+                raw_ids = payload.get("word_ids")
+                if not isinstance(raw_ids, list):
+                    raise ValueError("word_ids must be a list.")
+                try:
+                    word_ids = [int(value) for value in raw_ids]
+                    speed = float(payload.get("speed", 0.95))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Invalid word selection or speed.") from exc
+                job = JOBS.start(
+                    "slow-words",
+                    lambda j: pipeline.slow_words(name, word_ids, speed, CONFIG, j.log),
+                )
                 return self.send_json(job_payload(job))
             return self.send_error_json(HTTPStatus.NOT_FOUND, "Not found.")
         except Exception as exc:  # noqa: BLE001 - API error response
@@ -129,18 +124,54 @@ class Handler(BaseHTTPRequestHandler):
             while chunk := handle.read(1024 * 256):
                 self.wfile.write(chunk)
 
-    def update_directories(self, payload: dict[str, Any]) -> None:
-        input_dir = Path(str(payload.get("input_dir", ""))).expanduser().resolve()
-        output_dir = Path(str(payload.get("output_dir", ""))).expanduser().resolve()
-        if not input_dir.exists() or not input_dir.is_dir():
-            raise ValueError(f"Input directory does not exist: {input_dir}")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if not output_dir.is_dir():
-            raise ValueError(f"Output path is not a directory: {output_dir}")
-        CONFIG.input_dir = str(input_dir)
-        CONFIG.output_dir = str(pipeline.configure_output_dir(output_dir))
-        save_config(CONFIG)
-        self.send_json({"config": public_config(), "episodes": pipeline.list_episodes()})
+    def upload_wav(self) -> None:
+        if JOBS.busy():
+            raise ValueError("Wait for the current operation to finish.")
+        filename = decode_upload_filename(self.headers.get("X-Filename", ""))
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            raise ValueError("The uploaded WAV is empty.")
+        source_label = Path(filename).stem
+        name = pipeline.safe_name(source_label)
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="prosody_upload_", suffix=".wav", delete=False) as handle:
+                temp_path = Path(handle.name)
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(remaining, 1024 * 1024))
+                    if not chunk:
+                        raise ValueError("The WAV upload ended before the full file was received.")
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+        except Exception:
+            if temp_path:
+                temp_path.unlink(missing_ok=True)
+            raise
+
+        def import_upload(job: Job) -> dict:
+            global CURRENT_EPISODE
+            assert temp_path is not None
+            try:
+                CURRENT_EPISODE = None
+                pipeline.reset_workspace()
+                result = pipeline.import_wav(
+                    temp_path,
+                    name,
+                    job.log,
+                    display_name=source_label,
+                )
+                CURRENT_EPISODE = result["name"]
+                return result
+            finally:
+                temp_path.unlink(missing_ok=True)
+
+        try:
+            job = JOBS.start("upload-wav", import_upload)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        self.send_json(job_payload(job), HTTPStatus.ACCEPTED)
 
     def send_events(self, job_id: str) -> None:
         job = JOBS.get(job_id)
@@ -150,8 +181,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        for line in job.logs:
-            self.write_event(line)
         while True:
             item = job.events.get()
             if item is None:
@@ -170,25 +199,24 @@ class Handler(BaseHTTPRequestHandler):
 def require_name(payload: dict[str, Any]) -> str:
     name = str(payload.get("episode", "")).strip()
     if not name:
-        raise ValueError("Missing episode name.")
+        raise ValueError("No uploaded audio is selected.")
     return name
 
 
-def selected_ids(payload: dict[str, Any]) -> list[int]:
-    ids = [int(item) for item in payload.get("sentence_ids", [])]
-    if not ids:
-        raise ValueError("Select at least one sentence.")
-    return ids
+def decode_upload_filename(value: str) -> str:
+    filename = Path(urllib.parse.unquote(value).replace("\\", "/")).name
+    if not filename or Path(filename).suffix.lower() != ".wav":
+        raise ValueError("Choose a WAV file to upload.")
+    return filename
 
 
-def resolve_input_path(value: Any) -> Path:
-    raw = Path(str(value)).expanduser()
-    source = raw if raw.is_absolute() else Path(CONFIG.input_dir) / raw
-    source = source.resolve()
-    input_dir = Path(CONFIG.input_dir).resolve()
-    if source != input_dir and input_dir not in source.parents:
-        raise ValueError("Input WAV must be inside the configured input directory.")
-    return source
+def current_episode() -> dict[str, Any] | None:
+    if not CURRENT_EPISODE:
+        return None
+    ep_dir = pipeline.episode_dir(CURRENT_EPISODE)
+    if not ep_dir.exists():
+        return None
+    return pipeline.get_episode(CURRENT_EPISODE)
 
 
 def job_payload(job: Job) -> dict[str, Any]:
@@ -204,14 +232,10 @@ def job_payload(job: Job) -> dict[str, Any]:
 
 def public_config() -> dict[str, Any]:
     return {
-        "input_dir": CONFIG.input_dir,
-        "output_dir": CONFIG.output_dir,
-        "speed": CONFIG.speed,
-        "crossfade": CONFIG.crossfade,
-        "silence_threshold_db": CONFIG.silence_threshold_db,
-        "whisperx_python": CONFIG.whisperx_python,
-        "cosyvoice_python": CONFIG.cosyvoice_python,
-        "cosyvoice_model_dir": CONFIG.cosyvoice_model_dir,
+        "model": CONFIG.qwen_asr_model,
+        "align_model": CONFIG.qwen_aligner_model,
+        "language": CONFIG.qwen_language,
+        "device": CONFIG.qwen_device,
     }
 
 

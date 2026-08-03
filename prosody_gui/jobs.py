@@ -29,13 +29,15 @@ class Job:
 class JobManager:
     def __init__(self) -> None:
         self._counter = itertools.count(1)
-        self._jobs: dict[str, Job] = {}
+        self._job: Job | None = None
         self._lock = threading.Lock()
 
     def start(self, action: str, fn: JobFn) -> Job:
         job = Job(id=str(next(self._counter)), action=action)
         with self._lock:
-            self._jobs[job.id] = job
+            if self._job and self._job.status in {"queued", "running"}:
+                raise RuntimeError("Wait for the current operation to finish.")
+            self._job = job
 
         def run() -> None:
             job.status = "running"
@@ -57,4 +59,10 @@ class JobManager:
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
-            return self._jobs.get(job_id)
+            if self._job and self._job.id == job_id:
+                return self._job
+            return None
+
+    def busy(self) -> bool:
+        with self._lock:
+            return bool(self._job and self._job.status in {"queued", "running"})
