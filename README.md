@@ -45,7 +45,8 @@ outside the project environment and restarts itself with `.venv/bin/python`.
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765), upload a short WAV, and
 click **Transcribe**. This is also the recommended first-run smoke test before
-processing a long recording.
+processing a long recording. Progress, command output, and full error details
+are written to the terminal that started the GUI.
 
 The first launch creates the ignored `prosody_gui/config.json`. The server
 loads both models lazily on the first transcription and reuses them for later

@@ -3,7 +3,6 @@ const state = {
   activeWord: null,
   previewAudio: null,
   taskBusy: false,
-  events: null,
   selectedWords: new Set(),
   effectGroups: [],
 };
@@ -16,12 +15,6 @@ function mediaUrl(path) {
 
 function setStatus(text) {
   el("status").textContent = text;
-}
-
-function log(message) {
-  const box = el("log");
-  box.textContent += `${message}\n`;
-  box.scrollTop = box.scrollHeight;
 }
 
 async function api(path, body = null) {
@@ -119,7 +112,7 @@ function playWord(word) {
   state.previewAudio.play()
     .catch((error) => {
       stopPreview();
-      log(`Could not play preview: ${error.message}`);
+      setStatus(`Preview failed: ${error.message}`);
     });
 }
 
@@ -221,44 +214,34 @@ function renderSentences() {
   });
 }
 
-function watchJob(job) {
-  if (state.events) state.events.close();
+async function watchJob(job) {
   setStatus(job.action === "upload-wav" ? "Uploading" : "Running");
-  log(`Job ${job.id}: ${job.action}`);
-  state.events = new EventSource(`/api/jobs/${job.id}/events`);
-  state.events.onmessage = async (event) => {
-    if (event.data === "[[DONE]]") {
-      state.events.close();
-      const finalJob = await api(`/api/jobs/${job.id}`);
-      setStatus(finalJob.status === "done" ? "Done" : "Failed");
-      if (finalJob.error) log(finalJob.error);
-      if (finalJob.action === "upload-wav") {
-        state.selectedWords.clear();
-        state.effectGroups = [];
-        el("uploadHint").textContent = finalJob.status === "done"
-          ? `${finalJob.result.display_name || finalJob.result.name} uploaded. Transcribe it when you are ready.`
-          : "Upload failed. Choose the WAV again to retry.";
-      }
-      if (finalJob.action === "transcribe" && finalJob.status === "done") {
-        state.selectedWords.clear();
-        state.effectGroups = [];
-      }
-      if (finalJob.result?.name) state.episode = finalJob.result;
-      setTaskBusy(false);
-      renderEpisode();
-      return;
-    }
-    log(event.data);
-  };
-  state.events.onerror = () => {
-    if (state.events?.readyState !== EventSource.CLOSED) log("Lost the live job log connection.");
-  };
+  let finalJob = job;
+  while (["queued", "running"].includes(finalJob.status)) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    finalJob = await api(`/api/jobs/${job.id}`);
+  }
+  setStatus(finalJob.status === "done" ? "Done" : "Failed");
+  if (finalJob.action === "upload-wav") {
+    state.selectedWords.clear();
+    state.effectGroups = [];
+    el("uploadHint").textContent = finalJob.status === "done"
+      ? `${finalJob.result.display_name || finalJob.result.name} uploaded. Transcribe it when you are ready.`
+      : "Upload failed. See the terminal for details, then choose the WAV again to retry.";
+  }
+  if (finalJob.action === "transcribe" && finalJob.status === "done") {
+    state.selectedWords.clear();
+    state.effectGroups = [];
+  }
+  if (finalJob.result?.name) state.episode = finalJob.result;
+  setTaskBusy(false);
+  renderEpisode();
 }
 
 async function startJob(path, payload) {
   setTaskBusy(true);
   try {
-    watchJob(await api(path, payload));
+    await watchJob(await api(path, payload));
   } catch (error) {
     setTaskBusy(false);
     renderEpisode();
@@ -278,7 +261,7 @@ function setTaskBusy(busy) {
 async function uploadWav(file) {
   if (!file || !file.name.toLowerCase().endsWith(".wav")) {
     el("uploadHint").textContent = "Please choose a WAV file.";
-    log("Upload rejected: only WAV files are supported.");
+    setStatus("Invalid file");
     return;
   }
   setTaskBusy(true);
@@ -292,13 +275,13 @@ async function uploadWav(file) {
     });
     const job = await response.json();
     if (!response.ok) throw new Error(job.error || response.statusText);
-    watchJob(job);
+    await watchJob(job);
   } catch (error) {
     setTaskBusy(false);
     renderEpisode();
     setStatus("Failed");
     el("uploadHint").textContent = "Upload failed. Choose the WAV again to retry.";
-    log(error.message);
+    console.error(error);
   }
 }
 
@@ -320,20 +303,26 @@ el("uploadPanel").addEventListener("drop", (event) => {
   if (!state.taskBusy) uploadWav(event.dataTransfer.files[0]);
 });
 el("transcribeBtn").addEventListener("click", () => {
-  startJob("/api/transcribe", { episode: state.episode.name }).catch((error) => log(error.message));
+  startJob("/api/transcribe", { episode: state.episode.name }).catch((error) => {
+    console.error(error);
+    setStatus("Failed — see terminal");
+  });
 });
 el("slowWordsBtn").addEventListener("click", () => {
   startJob("/api/slow-words", {
     episode: state.episode.name,
     edits: state.effectGroups,
-  }).catch((error) => log(error.message));
+  }).catch((error) => {
+    console.error(error);
+    setStatus("Failed — see terminal");
+  });
 });
 el("addEffectBtn").addEventListener("click", () => {
   const selected = [...state.selectedWords].sort((a, b) => a - b);
   const assigned = new Set(state.effectGroups.flatMap((group) => group.word_ids));
   const overlap = selected.filter((wordId) => assigned.has(wordId));
   if (overlap.length) {
-    log(`Words already assigned to another effect group: ${overlap.join(", ")}`);
+    setStatus(`Words already assigned to another group: ${overlap.join(", ")}`);
     return;
   }
   state.effectGroups.push({
@@ -346,8 +335,9 @@ el("addEffectBtn").addEventListener("click", () => {
   state.selectedWords.clear();
   renderEpisode();
 });
-el("clearLogBtn").addEventListener("click", () => { el("log").textContent = ""; });
-
 api("/api/current")
   .then((data) => { state.episode = data.episode; renderEpisode(); })
-  .catch((error) => log(error.message));
+  .catch((error) => {
+    console.error(error);
+    setStatus("Failed — see terminal");
+  });

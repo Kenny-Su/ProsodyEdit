@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import unicodedata
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -29,6 +30,36 @@ SENTENCE_END_RE = re.compile(r"[.!?。！？][\"'”’）】》]*$")
 NO_LEADING_SPACE_RE = re.compile(r"^[,.;:!?%。，、；：！？）】》”’]")
 NO_TRAILING_SPACE_RE = re.compile(r"[（【《“‘/]$")
 CJK_RE = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+NON_TERMINAL_ABBREVIATIONS = {
+    "dr",
+    "jr",
+    "mr",
+    "mrs",
+    "ms",
+    "prof",
+    "sr",
+    "st",
+}
+LIKELY_SENTENCE_STARTERS = {
+    "a",
+    "after",
+    "although",
+    "an",
+    "before",
+    "but",
+    "he",
+    "however",
+    "it",
+    "meanwhile",
+    "mr",
+    "mrs",
+    "she",
+    "that",
+    "the",
+    "they",
+    "this",
+    "when",
+}
 
 
 @dataclass
@@ -243,23 +274,146 @@ def _timed_units(result: Any) -> list[tuple[str, float, float]]:
     return units
 
 
+def _is_aligner_character(char: str) -> bool:
+    return char == "'" or unicodedata.category(char)[0] in {"L", "N"}
+
+
+def _aligner_token_count(text: str) -> int:
+    """Count tokens the same way as Qwen's space-language aligner processor."""
+    count = 0
+    for segment in text.split():
+        cleaned = "".join(char for char in segment if _is_aligner_character(char))
+        in_non_cjk_token = False
+        for char in cleaned:
+            if CJK_RE.match(char):
+                if in_non_cjk_token:
+                    count += 1
+                    in_non_cjk_token = False
+                count += 1
+            else:
+                in_non_cjk_token = True
+        if in_non_cjk_token:
+            count += 1
+    return count
+
+
+def _source_sentence_groups(result: Any, unit_count: int) -> list[tuple[int, str]]:
+    """Return cumulative aligned-token boundaries derived from ASR punctuation."""
+    source = str(_field(result, "text", "") or "").strip()
+    if not source:
+        return []
+
+    groups: list[tuple[int, str]] = []
+    start = 0
+    token_total = 0
+    index = 0
+    while index < len(source):
+        if source[index] not in ".!?。！？":
+            index += 1
+            continue
+        if source[index] == ".":
+            before = re.search(r"([A-Za-z]+)$", source[:index])
+            previous_word = before.group(1) if before else ""
+            immediate_next = source[index + 1:index + 2]
+            if (
+                (immediate_next and immediate_next.isalnum())
+                or previous_word.lower() in NON_TERMINAL_ABBREVIATIONS
+                or len(previous_word) == 1
+            ):
+                index += 1
+                continue
+        end = index + 1
+        while end < len(source) and source[end] in "\"'”’）】》":
+            end += 1
+        sentence_text = source[start:end].strip()
+        count = _aligner_token_count(sentence_text)
+        if count:
+            token_total += count
+            groups.append((token_total, sentence_text))
+        start = end
+        index = end
+
+    trailing = source[start:].strip()
+    if trailing:
+        count = _aligner_token_count(trailing)
+        if count:
+            token_total += count
+            groups.append((token_total, trailing))
+
+    if len(groups) < 2:
+        return []
+    if token_total == unit_count:
+        return groups
+
+    # The aligner can occasionally merge or discard a token. Preserve the ASR
+    # sentence proportions instead of throwing away every boundary because of
+    # a small count mismatch; the final sentence always absorbs the remainder.
+    adjusted: list[tuple[int, str]] = []
+    previous = 0
+    for boundary, sentence_text in groups[:-1]:
+        mapped = round(boundary * unit_count / token_total)
+        mapped = max(previous + 1, min(mapped, unit_count - 1))
+        adjusted.append((mapped, sentence_text))
+        previous = mapped
+    adjusted.append((unit_count, groups[-1][1]))
+    return adjusted
+
+
+def _punctuation_free_groups(
+    units: list[tuple[str, float, float]],
+) -> list[list[tuple[str, float, float]]]:
+    """Create readable utterances when the ASR supplies no sentence punctuation."""
+    if len(units) <= 45:
+        return [units] if units else []
+    groups: list[list[tuple[str, float, float]]] = []
+    start = 0
+    while len(units) - start > 45:
+        low = start + 20
+        high = min(start + 36, len(units) - 20)
+        target = start + 30
+        candidates: list[tuple[float, int]] = []
+        for boundary in range(low, high + 1):
+            previous = units[boundary - 1]
+            following = units[boundary]
+            pause = max(0.0, following[1] - previous[2])
+            starter = re.sub(r"[^A-Za-z]", "", following[0]).lower()
+            starter_bonus = 1.0 if starter in LIKELY_SENTENCE_STARTERS else 0.0
+            distance_penalty = abs(boundary - target) * 0.015
+            candidates.append((starter_bonus + pause - distance_penalty, boundary))
+        boundary = max(candidates)[1]
+        groups.append(units[start:boundary])
+        start = boundary
+    groups.append(units[start:])
+    return groups
+
+
 def parse_sentences(ep_dir: Path) -> list[Sentence]:
     result = TRANSCRIPTS.get(ep_dir.name)
     if result is None:
         return []
     sentences: list[Sentence] = []
     word_index = 0
-    grouped: list[list[tuple[str, float, float]]] = []
-    pending: list[tuple[str, float, float]] = []
-    for unit in _timed_units(result):
-        pending.append(unit)
-        if SENTENCE_END_RE.search(unit[0]):
-            grouped.append(pending)
-            pending = []
-    if pending:
-        grouped.append(pending)
+    units = _timed_units(result)
+    grouped: list[tuple[list[tuple[str, float, float]], str | None]] = []
+    source_groups = _source_sentence_groups(result, len(units))
+    if source_groups:
+        group_start = 0
+        for group_end, source_text in source_groups:
+            grouped.append((units[group_start:group_end], source_text))
+            group_start = group_end
+    else:
+        pending: list[tuple[str, float, float]] = []
+        for unit in units:
+            pending.append(unit)
+            if SENTENCE_END_RE.search(unit[0]):
+                grouped.append((pending, None))
+                pending = []
+        if pending:
+            grouped.append((pending, None))
+        if len(grouped) == 1 and len(units) > 45:
+            grouped = [(group, None) for group in _punctuation_free_groups(units)]
 
-    for idx, group in enumerate(grouped, 1):
+    for idx, (group, source_text) in enumerate(grouped, 1):
         words: list[Word] = []
         for sentence_word_index, (text, start, end) in enumerate(group, 1):
             word_index += 1
@@ -282,7 +436,7 @@ def parse_sentences(ep_dir: Path) -> list[Sentence]:
                 index=idx,
                 start=group[0][1],
                 end=group[-1][2],
-                text=join_units(unit[0] for unit in group),
+                text=source_text or join_units(unit[0] for unit in group),
                 words=words,
                 sentence_audio=rel(sentence_wav) if sentence_wav.exists() else None,
             )

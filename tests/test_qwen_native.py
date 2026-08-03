@@ -23,6 +23,63 @@ def result(items, language: str = "English", text: str = "") -> SimpleNamespace:
 
 
 class QwenNativeTests(unittest.TestCase):
+    def test_groups_punctuation_free_aligner_words_from_full_transcript(self) -> None:
+        pipeline.set_transcript(
+            "episode",
+            result(
+                [
+                    item("First", 0.1, 0.3),
+                    item("sentence", 0.3, 0.7),
+                    item("Second", 0.9, 1.2),
+                    item("sentence", 1.2, 1.6),
+                ],
+                text="First sentence. Second sentence!",
+            ),
+        )
+        with patch.object(pipeline, "words_dir", return_value=Path("/tmp/words")), patch.object(
+            pipeline, "sentences_dir", return_value=Path("/tmp/sentences")
+        ):
+            sentences = pipeline.parse_sentences(Path("/tmp/episode"))
+
+        self.assertEqual([sentence.text for sentence in sentences], ["First sentence.", "Second sentence!"])
+        self.assertEqual([[word.text for word in sentence.words] for sentence in sentences], [["First", "sentence"], ["Second", "sentence"]])
+        self.assertEqual([(sentence.start, sentence.end) for sentence in sentences], [(0.1, 0.7), (0.9, 1.6)])
+
+    def test_does_not_split_titles_or_initials(self) -> None:
+        words = ["Mr", "Greenspan", "served", "George", "HW", "Bush", "He", "retired"]
+        pipeline.set_transcript(
+            "episode",
+            result(
+                [item(word, index * 0.2, index * 0.2 + 0.1) for index, word in enumerate(words)],
+                text="Mr. Greenspan served George H.W. Bush. He retired.",
+            ),
+        )
+        with patch.object(pipeline, "words_dir", return_value=Path("/tmp/words")), patch.object(
+            pipeline, "sentences_dir", return_value=Path("/tmp/sentences")
+        ):
+            sentences = pipeline.parse_sentences(Path("/tmp/episode"))
+
+        self.assertEqual(
+            [sentence.text for sentence in sentences],
+            ["Mr. Greenspan served George H.W. Bush.", "He retired."],
+        )
+        self.assertEqual([len(sentence.words) for sentence in sentences], [6, 2])
+
+    def test_groups_long_punctuation_free_transcript_into_utterances(self) -> None:
+        words = [f"word{index}" for index in range(1, 30)] + ["Mr"]
+        words += [f"word{index}" for index in range(31, 55)] + ["He"]
+        words += [f"word{index}" for index in range(56, 96)]
+        aligned = [item(word, index * 0.2, index * 0.2 + 0.1) for index, word in enumerate(words)]
+        pipeline.set_transcript("episode", result(aligned, text=" ".join(words)))
+        with patch.object(pipeline, "words_dir", return_value=Path("/tmp/words")), patch.object(
+            pipeline, "sentences_dir", return_value=Path("/tmp/sentences")
+        ):
+            sentences = pipeline.parse_sentences(Path("/tmp/episode"))
+
+        self.assertEqual([len(sentence.words) for sentence in sentences], [29, 25, 41])
+        self.assertEqual(sentences[1].words[0].text, "Mr")
+        self.assertEqual(sentences[2].words[0].text, "He")
+
     def test_groups_native_english_timestamps_and_trailing_fragment(self) -> None:
         pipeline.set_transcript(
             "episode",

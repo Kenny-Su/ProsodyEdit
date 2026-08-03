@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import itertools
-import queue
+import logging
 import threading
-import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
 JobFn = Callable[["Job"], Any]
+LOGGER = logging.getLogger("prosodyedit.jobs")
 
 
 @dataclass
@@ -18,12 +18,8 @@ class Job:
     status: str = "queued"
     result: Any = None
     error: str | None = None
-    events: "queue.Queue[str | None]" = field(default_factory=queue.Queue)
-    logs: list[str] = field(default_factory=list)
-
     def log(self, message: str) -> None:
-        self.logs.append(message)
-        self.events.put(message)
+        LOGGER.info("Job %s (%s): %s", self.id, self.action, message)
 
 
 class JobManager:
@@ -46,13 +42,11 @@ class JobManager:
                 job.result = fn(job)
                 job.status = "done"
                 job.log(f"Finished {action}.")
-            except Exception as exc:  # noqa: BLE001 - surfaced to the browser log
+            except Exception as exc:  # noqa: BLE001 - reported in the terminal
                 job.status = "failed"
                 job.error = str(exc)
                 job.log(f"Failed: {exc}")
-                job.log(traceback.format_exc())
-            finally:
-                job.events.put(None)
+                LOGGER.exception("Job %s (%s) failed", job.id, job.action)
 
         threading.Thread(target=run, daemon=True).start()
         return job

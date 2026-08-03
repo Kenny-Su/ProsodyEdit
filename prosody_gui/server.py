@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import tempfile
 import urllib.parse
@@ -14,6 +15,7 @@ from .jobs import Job, JobManager
 from . import pipeline
 
 
+LOGGER = logging.getLogger("prosodyedit.server")
 CONFIG = load_config()
 WORKSPACE = tempfile.TemporaryDirectory(prefix="prosodyedit_workspace_")
 pipeline.configure_output_dir(WORKSPACE.name)
@@ -35,9 +37,6 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_media(path.removeprefix("/media/"))
         if path == "/api/current":
             return self.send_json({"episode": current_episode(), "config": public_config()})
-        if path.startswith("/api/jobs/") and path.endswith("/events"):
-            job_id = path.split("/")[3]
-            return self.send_events(job_id)
         if path.startswith("/api/jobs/"):
             job_id = path.rsplit("/", 1)[-1]
             job = JOBS.get(job_id)
@@ -97,6 +96,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(job_payload(job))
             return self.send_error_json(HTTPStatus.NOT_FOUND, "Not found.")
         except Exception as exc:  # noqa: BLE001 - API error response
+            LOGGER.exception("Request failed: %s %s", self.command, path)
             return self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
 
     def read_json(self) -> dict[str, Any]:
@@ -194,25 +194,6 @@ class Handler(BaseHTTPRequestHandler):
             raise
         self.send_json(job_payload(job), HTTPStatus.ACCEPTED)
 
-    def send_events(self, job_id: str) -> None:
-        job = JOBS.get(job_id)
-        if not job:
-            return self.send_error_json(HTTPStatus.NOT_FOUND, "Job not found.")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        while True:
-            item = job.events.get()
-            if item is None:
-                self.write_event("[[DONE]]")
-                break
-            self.write_event(item)
-
-    def write_event(self, line: str) -> None:
-        self.wfile.write(f"data: {line}\n\n".encode("utf-8"))
-        self.wfile.flush()
-
     def log_message(self, fmt: str, *args: Any) -> None:
         return
 
@@ -247,7 +228,6 @@ def job_payload(job: Job) -> dict[str, Any]:
         "status": job.status,
         "result": job.result,
         "error": job.error,
-        "logs": job.logs[-200:],
     }
 
 
@@ -263,6 +243,7 @@ def public_config() -> dict[str, Any]:
 def main() -> None:
     import argparse
 
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
