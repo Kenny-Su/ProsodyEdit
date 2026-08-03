@@ -234,6 +234,25 @@ audio {
   text-decoration: none;
 }
 
+.effect-groups {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.effect-group {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #c9d8e7;
+  border-radius: 6px;
+  background: #f3f7fb;
+  color: #34495e;
+  font-size: 12px;
+}
+
 .download-link:hover {
   text-decoration: underline;
 }
@@ -449,6 +468,7 @@ audio {
   justify-content: flex-end;
   gap: 14px;
   padding: 10px 0;
+  flex-wrap: wrap;
 }
 
 .edit-toolbar > div {
@@ -464,7 +484,7 @@ audio {
 }
 
 .edit-toolbar input {
-  width: 72px;
+  width: 68px;
 }
 
 .download-link {

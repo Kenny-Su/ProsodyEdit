@@ -43,11 +43,17 @@ context for checking the reported boundary.
 ## Word-level slowdown
 
 Select one or more aligned words in the GUI and choose a speed between `0.50`
-and `0.99`. Consecutive selected word indexes are merged into one interval from
-the first word's start through the last word's end, then processed with one
-FFmpeg `atempo` operation. This also slows the natural pauses inside that run.
-Nonconsecutive selections remain separate chunks; audio between them and the
-remaining tail are concatenated unchanged.
+and `0.99`, a volume boost between `0` and `6 dB`, and optional pauses of up to
+`500 ms` before and after. Consecutive selected word indexes are merged into one
+interval from the first word's start through the last word's end, then processed
+with FFmpeg `atempo` and `volume`. `adelay` and `apad` insert silence before and
+after the run while preserving the source format. Nonconsecutive selections
+remain separate chunks; audio between them and the remaining tail is unchanged.
+
+Each selection and its settings are saved as an effect group. Additional words
+can be selected with different speed, gain, and pause settings. Groups cannot
+share a word; all groups are sorted by source timestamp and rendered together
+when the edited WAV is created.
 
 The result is exported as temporary PCM `s16le` audio at `edited.wav` and is
 available through the Edited player and Download WAV link.

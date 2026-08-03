@@ -436,31 +436,98 @@ def cut_transcript_audio(name: str, config: AppConfig, log: LogFn) -> dict:
     return get_episode(name)
 
 
-def slow_words(name: str, word_ids: Iterable[int], speed: float, config: AppConfig, log: LogFn) -> dict:
-    if not math.isfinite(speed) or not 0.5 <= speed < 1.0:
-        raise ValueError("Speed must be at least 0.50 and less than 1.00.")
+def slow_words(
+    name: str,
+    word_ids: Iterable[int],
+    speed: float,
+    config: AppConfig,
+    log: LogFn,
+    gain_db: float = 0.0,
+    pause_before_ms: int = 0,
+    pause_after_ms: int = 0,
+) -> dict:
+    return edit_word_groups(
+        name,
+        [
+            {
+                "word_ids": list(word_ids),
+                "speed": speed,
+                "gain_db": gain_db,
+                "pause_before_ms": pause_before_ms,
+                "pause_after_ms": pause_after_ms,
+            }
+        ],
+        config,
+        log,
+    )
+
+
+def edit_word_groups(
+    name: str,
+    edits: Iterable[dict[str, Any]],
+    config: AppConfig,
+    log: LogFn,
+) -> dict:
+    edit_list = list(edits)
+    if not edit_list:
+        raise ValueError("Add at least one word effect group.")
     ep_dir = display_episode_dir(name)
     wav = original_wav(ep_dir)
     if not wav.exists():
         raise FileNotFoundError(wav)
     available = {word.index: word for word in parse_words(ep_dir)}
-    requested = sorted(set(int(word_id) for word_id in word_ids))
-    if not requested:
-        raise ValueError("Select at least one word to slow down.")
-    missing = [word_id for word_id in requested if word_id not in available]
-    if missing:
-        raise ValueError(f"Unknown word indexes: {', '.join(map(str, missing))}.")
-    selected_words = [available[word_id] for word_id in requested]
-    groups: list[list[Word]] = []
-    for word in selected_words:
-        if groups and word.index == groups[-1][-1].index + 1:
-            groups[-1].append(word)
-        else:
-            groups.append([word])
-    chunks = [(group[0].start, group[-1].end) for group in groups]
+    assigned: set[int] = set()
+    chunks: list[dict[str, Any]] = []
+
+    for edit_number, edit in enumerate(edit_list, 1):
+        try:
+            speed = float(edit.get("speed", 0.95))
+            gain_db = float(edit.get("gain_db", 0.0))
+            pause_before_ms = int(edit.get("pause_before_ms", 0))
+            pause_after_ms = int(edit.get("pause_after_ms", 0))
+            requested = sorted(set(int(value) for value in edit.get("word_ids", [])))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid settings in effect group {edit_number}.") from exc
+        if not math.isfinite(speed) or not 0.5 <= speed < 1.0:
+            raise ValueError("Speed must be at least 0.50 and less than 1.00.")
+        if not math.isfinite(gain_db) or not 0.0 <= gain_db <= 6.0:
+            raise ValueError("Volume boost must be between 0 and 6 dB.")
+        if not 0 <= pause_before_ms <= 500 or not 0 <= pause_after_ms <= 500:
+            raise ValueError("Pauses must be between 0 and 500 milliseconds.")
+        if not requested:
+            raise ValueError(f"Effect group {edit_number} has no selected words.")
+        duplicates = assigned.intersection(requested)
+        if duplicates:
+            raise ValueError(f"Words cannot belong to multiple effect groups: {sorted(duplicates)}.")
+        missing = [word_id for word_id in requested if word_id not in available]
+        if missing:
+            raise ValueError(f"Unknown word indexes: {', '.join(map(str, missing))}.")
+        assigned.update(requested)
+        selected_words = [available[word_id] for word_id in requested]
+        runs: list[list[Word]] = []
+        for word in selected_words:
+            if runs and word.index == runs[-1][-1].index + 1:
+                runs[-1].append(word)
+            else:
+                runs.append([word])
+        for run in runs:
+            chunks.append(
+                {
+                    "start": run[0].start,
+                    "end": run[-1].end,
+                    "speed": speed,
+                    "gain_db": gain_db,
+                    "pause_before_ms": pause_before_ms,
+                    "pause_after_ms": pause_after_ms,
+                    "word_count": len(run),
+                    "edit_number": edit_number,
+                }
+            )
+
+    chunks.sort(key=lambda chunk: (chunk["start"], chunk["end"]))
     for previous, current in zip(chunks, chunks[1:]):
-        if current[0] < previous[1]:
-            raise ValueError("Selected word intervals overlap.")
+        if current["start"] < previous["end"]:
+            raise ValueError("Effect group intervals overlap.")
 
     filters: list[str] = []
     labels: list[str] = []
@@ -471,18 +538,23 @@ def slow_words(name: str, word_ids: Iterable[int], speed: float, config: AppConf
         filters.append(f"[0:a]{expression},asetpts=PTS-STARTPTS[{label}]")
         labels.append(f"[{label}]")
 
-    for start, end in chunks:
+    for chunk in chunks:
+        start, end = chunk["start"], chunk["end"]
         if start > cursor + 0.000001:
             add_segment(f"atrim=start={cursor:.6f}:end={start:.6f}")
-        add_segment(f"atrim=start={start:.6f}:end={end:.6f},atempo={speed:.6f}")
+        effects = [f"atrim=start={start:.6f}:end={end:.6f}", f"atempo={chunk['speed']:.6f}"]
+        if chunk["gain_db"]:
+            effects.append(f"volume={chunk['gain_db']:.3f}dB")
+        if chunk["pause_before_ms"]:
+            effects.append(f"adelay=delays={chunk['pause_before_ms']}:all=1")
+        if chunk["pause_after_ms"]:
+            effects.append(f"apad=pad_dur={chunk['pause_after_ms'] / 1000:.3f}")
+        add_segment(",".join(effects))
         cursor = end
     add_segment(f"atrim=start={cursor:.6f}")
     output = edited_wav(ep_dir)
     filter_complex = ";".join(filters + [f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[out]"])
-    log(
-        f"Slowing {len(selected_words)} selected word(s) in "
-        f"{len(chunks)} contiguous chunk(s) to {speed:.2f}x."
-    )
+    log(f"Applying {len(edit_list)} effect group(s) to {len(assigned)} word(s) in {len(chunks)} chunk(s).")
     ffmpeg(
         config,
         [

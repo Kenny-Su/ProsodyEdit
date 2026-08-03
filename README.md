@@ -77,11 +77,18 @@ in-memory transcript.
 ## Word-level slowdown
 
 After transcription, select any words with their checkboxes, choose a speed
-from `0.50` to `0.99`, and click **Create edited WAV**. ProsodyEdit applies
-FFmpeg `atempo` to every selected run and concatenates the result in timeline
-order. Consecutive selected words are merged from the first word's start to the
-last word's end, including their internal pauses. Nonconsecutive selections
-remain separate chunks, and all audio between those chunks is unchanged.
+from `0.50` to `0.99`, an optional `0–6 dB` volume boost, and optional pauses
+of `0–500 ms` before and after each selected run. ProsodyEdit applies FFmpeg
+`atempo`, `volume`, `adelay`, and `apad`, then concatenates the result in
+timeline order. Consecutive selected words are merged from the first word's
+start to the last word's end, including their internal pauses. Nonconsecutive
+selections remain separate chunks, and all audio between those chunks is
+unchanged.
+
+Click **Add effect group** to save those settings, then select another set of
+words and add a group with different values. A word may belong to only one
+group. Review or remove groups from the list, then click **Create edited WAV**
+to apply every group in one timeline-ordered FFmpeg export.
 The edited episode becomes longer by the added duration of the slowed words.
 
 Use the Edited player to review the result or click **Download WAV**. Creating

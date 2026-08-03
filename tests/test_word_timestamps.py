@@ -91,7 +91,7 @@ class WordTimestampTests(unittest.TestCase):
         self.assertEqual(Path(command[-1]).resolve(), pipeline.edited_wav(self.episode_dir).resolve())
 
     def test_word_slowdown_validates_selection_and_speed(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Select at least one"):
+        with self.assertRaisesRegex(ValueError, "no selected words"):
             pipeline.slow_words("episode", [], 0.95, AppConfig(), lambda _message: None)
         with self.assertRaisesRegex(ValueError, "less than 1.00"):
             pipeline.slow_words("episode", [1], 1.0, AppConfig(), lambda _message: None)
@@ -108,7 +108,65 @@ class WordTimestampTests(unittest.TestCase):
         graph = commands[0][commands[0].index("-filter_complex") + 1]
         self.assertIn("atrim=start=1.000000:end=2.200000,atempo=0.900000", graph)
         self.assertNotIn("atrim=start=1.000000:end=1.300000,atempo", graph)
-        self.assertTrue(any("3 selected word(s) in 1 contiguous chunk(s)" in line for line in logs))
+        self.assertTrue(any("1 effect group(s) to 3 word(s) in 1 chunk(s)" in line for line in logs))
+
+    def test_applies_volume_and_pauses_to_each_selected_chunk(self) -> None:
+        commands: list[list[str]] = []
+        with (
+            patch.object(pipeline, "run_command", side_effect=lambda args, *_args, **_kwargs: commands.append(args)),
+            patch.object(pipeline, "get_episode", return_value={"name": "episode"}),
+        ):
+            pipeline.slow_words(
+                "episode",
+                [1, 2],
+                0.9,
+                AppConfig(),
+                lambda _message: None,
+                gain_db=2.5,
+                pause_before_ms=80,
+                pause_after_ms=120,
+            )
+
+        graph = commands[0][commands[0].index("-filter_complex") + 1]
+        self.assertIn(
+            "atrim=start=1.000000:end=1.650000,atempo=0.900000,"
+            "volume=2.500dB,adelay=delays=80:all=1,apad=pad_dur=0.120",
+            graph,
+        )
+
+    def test_word_slowdown_validates_gain_and_pauses(self) -> None:
+        with self.assertRaisesRegex(ValueError, "between 0 and 6"):
+            pipeline.slow_words(
+                "episode", [1], 0.95, AppConfig(), lambda _message: None, gain_db=7
+            )
+        with self.assertRaisesRegex(ValueError, "between 0 and 500"):
+            pipeline.slow_words(
+                "episode", [1], 0.95, AppConfig(), lambda _message: None, pause_before_ms=501
+            )
+
+    def test_applies_distinct_settings_to_multiple_effect_groups(self) -> None:
+        commands: list[list[str]] = []
+        edits = [
+            {"word_ids": [1, 2], "speed": 0.9, "gain_db": 2, "pause_after_ms": 80},
+            {"word_ids": [4], "speed": 0.8, "gain_db": 4, "pause_before_ms": 120},
+        ]
+        with (
+            patch.object(pipeline, "run_command", side_effect=lambda args, *_args, **_kwargs: commands.append(args)),
+            patch.object(pipeline, "get_episode", return_value={"name": "episode"}),
+        ):
+            pipeline.edit_word_groups("episode", edits, AppConfig(), lambda _message: None)
+        graph = commands[0][commands[0].index("-filter_complex") + 1]
+        self.assertIn("atempo=0.900000,volume=2.000dB,apad=pad_dur=0.080", graph)
+        self.assertIn("atempo=0.800000,volume=4.000dB,adelay=delays=120:all=1", graph)
+
+    def test_rejects_words_assigned_to_multiple_effect_groups(self) -> None:
+        with self.assertRaisesRegex(ValueError, "multiple effect groups"):
+            pipeline.edit_word_groups(
+                "episode",
+                [{"word_ids": [1, 2]}, {"word_ids": [2, 3]}],
+                AppConfig(),
+                lambda _message: None,
+            )
 
     def test_episode_payload_contains_alignment_data_only(self) -> None:
         episode = pipeline.get_episode("episode")

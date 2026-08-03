@@ -5,6 +5,7 @@ const state = {
   taskBusy: false,
   events: null,
   selectedWords: new Set(),
+  effectGroups: [],
 };
 
 const el = (id) => document.getElementById(id);
@@ -71,14 +72,42 @@ function renderEpisode() {
   el("downloadEdited").href = editedUrl;
   el("editToolbar").hidden = !episode?.transcript;
   updateEditControls();
+  renderEffectGroups();
   renderSentences();
 }
 
 function updateEditControls() {
   const count = state.selectedWords.size;
   el("selectedWordCount").textContent = `${count} word${count === 1 ? "" : "s"} selected`;
-  el("slowWordsBtn").disabled = state.taskBusy || count === 0;
-  el("slowSpeed").disabled = state.taskBusy;
+  el("addEffectBtn").disabled = state.taskBusy || count === 0;
+  el("slowWordsBtn").disabled = state.taskBusy || state.effectGroups.length === 0;
+  ["slowSpeed", "gainDb", "pauseBefore", "pauseAfter"].forEach((id) => {
+    el(id).disabled = state.taskBusy;
+  });
+}
+
+function renderEffectGroups() {
+  const container = el("effectGroups");
+  container.innerHTML = "";
+  container.hidden = state.effectGroups.length === 0;
+  state.effectGroups.forEach((group, index) => {
+    const row = document.createElement("div");
+    row.className = "effect-group";
+    const words = getWords().filter((word) => group.word_ids.includes(word.index)).map((word) => word.text);
+    const summary = document.createElement("span");
+    summary.textContent = `Group ${index + 1}: ${words.join(" ")} · ${group.speed.toFixed(2)}× · +${group.gain_db.toFixed(1)} dB · ${group.pause_before_ms}/${group.pause_after_ms} ms`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "compact secondary";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => {
+      state.effectGroups.splice(index, 1);
+      renderEffectGroups();
+      updateEditControls();
+    });
+    row.append(summary, remove);
+    container.appendChild(row);
+  });
 }
 
 function playWord(word) {
@@ -205,12 +234,14 @@ function watchJob(job) {
       if (finalJob.error) log(finalJob.error);
       if (finalJob.action === "upload-wav") {
         state.selectedWords.clear();
+        state.effectGroups = [];
         el("uploadHint").textContent = finalJob.status === "done"
           ? `${finalJob.result.display_name || finalJob.result.name} uploaded. Transcribe it when you are ready.`
           : "Upload failed. Choose the WAV again to retry.";
       }
       if (finalJob.action === "transcribe" && finalJob.status === "done") {
         state.selectedWords.clear();
+        state.effectGroups = [];
       }
       if (finalJob.result?.name) state.episode = finalJob.result;
       setTaskBusy(false);
@@ -292,12 +323,28 @@ el("transcribeBtn").addEventListener("click", () => {
   startJob("/api/transcribe", { episode: state.episode.name }).catch((error) => log(error.message));
 });
 el("slowWordsBtn").addEventListener("click", () => {
-  const speed = Number(el("slowSpeed").value);
   startJob("/api/slow-words", {
     episode: state.episode.name,
-    word_ids: [...state.selectedWords],
-    speed,
+    edits: state.effectGroups,
   }).catch((error) => log(error.message));
+});
+el("addEffectBtn").addEventListener("click", () => {
+  const selected = [...state.selectedWords].sort((a, b) => a - b);
+  const assigned = new Set(state.effectGroups.flatMap((group) => group.word_ids));
+  const overlap = selected.filter((wordId) => assigned.has(wordId));
+  if (overlap.length) {
+    log(`Words already assigned to another effect group: ${overlap.join(", ")}`);
+    return;
+  }
+  state.effectGroups.push({
+    word_ids: selected,
+    speed: Number(el("slowSpeed").value),
+    gain_db: Number(el("gainDb").value),
+    pause_before_ms: Number(el("pauseBefore").value),
+    pause_after_ms: Number(el("pauseAfter").value),
+  });
+  state.selectedWords.clear();
+  renderEpisode();
 });
 el("clearLogBtn").addEventListener("click", () => { el("log").textContent = ""; });
 

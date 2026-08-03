@@ -61,17 +61,38 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(job_payload(job))
             if path == "/api/slow-words":
                 name = require_name(payload)
+                raw_edits = payload.get("edits")
+                if isinstance(raw_edits, list):
+                    if not all(isinstance(edit, dict) for edit in raw_edits):
+                        raise ValueError("Each effect group must be an object.")
+                    job = JOBS.start(
+                        "slow-words",
+                        lambda j: pipeline.edit_word_groups(name, raw_edits, CONFIG, j.log),
+                    )
+                    return self.send_json(job_payload(job))
                 raw_ids = payload.get("word_ids")
                 if not isinstance(raw_ids, list):
                     raise ValueError("word_ids must be a list.")
                 try:
                     word_ids = [int(value) for value in raw_ids]
                     speed = float(payload.get("speed", 0.95))
+                    gain_db = float(payload.get("gain_db", 0.0))
+                    pause_before_ms = int(payload.get("pause_before_ms", 0))
+                    pause_after_ms = int(payload.get("pause_after_ms", 0))
                 except (TypeError, ValueError) as exc:
-                    raise ValueError("Invalid word selection or speed.") from exc
+                    raise ValueError("Invalid word selection or edit settings.") from exc
                 job = JOBS.start(
                     "slow-words",
-                    lambda j: pipeline.slow_words(name, word_ids, speed, CONFIG, j.log),
+                    lambda j: pipeline.slow_words(
+                        name,
+                        word_ids,
+                        speed,
+                        CONFIG,
+                        j.log,
+                        gain_db,
+                        pause_before_ms,
+                        pause_after_ms,
+                    ),
                 )
                 return self.send_json(job_payload(job))
             return self.send_error_json(HTTPStatus.NOT_FOUND, "Not found.")
