@@ -74,7 +74,8 @@ function updateEditControls() {
   el("selectedWordCount").textContent = `${count} word${count === 1 ? "" : "s"} selected`;
   el("addEffectBtn").disabled = state.taskBusy || count === 0;
   el("slowWordsBtn").disabled = state.taskBusy || state.effectGroups.length === 0;
-  ["slowSpeed", "gainDb", "pauseBefore", "pauseAfter"].forEach((id) => {
+  el("aiEditBtn").disabled = state.taskBusy || getWords().length === 0;
+  ["slowSpeed", "gainDb"].forEach((id) => {
     el(id).disabled = state.taskBusy;
   });
 }
@@ -88,7 +89,7 @@ function renderEffectGroups() {
     row.className = "effect-group";
     const words = getWords().filter((word) => group.word_ids.includes(word.index)).map((word) => word.text);
     const summary = document.createElement("span");
-    summary.textContent = `Group ${index + 1}: ${words.join(" ")} · ${group.speed.toFixed(2)}× · +${group.gain_db.toFixed(1)} dB · ${group.pause_before_ms}/${group.pause_after_ms} ms`;
+    summary.textContent = `Group ${index + 1}: ${words.join(" ")} · ${group.speed.toFixed(2)}× · +${group.gain_db.toFixed(1)} dB`;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "compact secondary";
@@ -233,6 +234,10 @@ async function watchJob(job) {
     state.selectedWords.clear();
     state.effectGroups = [];
   }
+  if (finalJob.action === "ai-effects" && finalJob.status === "done") {
+    state.selectedWords.clear();
+    state.effectGroups = finalJob.result?.ai_effect_groups || [];
+  }
   if (finalJob.result?.name) state.episode = finalJob.result;
   setTaskBusy(false);
   renderEpisode();
@@ -317,6 +322,12 @@ el("slowWordsBtn").addEventListener("click", () => {
     setStatus("Failed — see terminal");
   });
 });
+el("aiEditBtn").addEventListener("click", () => {
+  startJob("/api/ai-effects", { episode: state.episode.name }).catch((error) => {
+    console.error(error);
+    setStatus("Failed — see terminal");
+  });
+});
 el("addEffectBtn").addEventListener("click", () => {
   const selected = [...state.selectedWords].sort((a, b) => a - b);
   const assigned = new Set(state.effectGroups.flatMap((group) => group.word_ids));
@@ -329,8 +340,6 @@ el("addEffectBtn").addEventListener("click", () => {
     word_ids: selected,
     speed: Number(el("slowSpeed").value),
     gain_db: Number(el("gainDb").value),
-    pause_before_ms: Number(el("pauseBefore").value),
-    pause_after_ms: Number(el("pauseAfter").value),
   });
   state.selectedWords.clear();
   renderEpisode();

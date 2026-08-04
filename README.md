@@ -78,13 +78,11 @@ in-memory transcript.
 ## Word-level slowdown
 
 After transcription, select any words with their checkboxes, choose a speed
-from `0.50` to `0.99`, an optional `0–6 dB` volume boost, and optional pauses
-of `0–500 ms` before and after each selected run. ProsodyEdit applies FFmpeg
-`atempo`, `volume`, `adelay`, and `apad`, then concatenates the result in
+from `0.50` to `0.99`, and an optional `0–6 dB` volume boost. ProsodyEdit
+applies FFmpeg `atempo` and `volume`, then concatenates the result in
 timeline order. Consecutive selected words are merged from the first word's
-start to the last word's end, including their internal pauses. Nonconsecutive
-selections remain separate chunks, and all audio between those chunks is
-unchanged.
+start to the last word's end. Nonconsecutive selections remain separate
+chunks, and all audio between those chunks is unchanged.
 
 Click **Add effect group** to save those settings, then select another set of
 words and add a group with different values. A word may belong to only one
@@ -100,3 +98,31 @@ The official Qwen wrapper automatically splits long audio to the forced
 aligner's supported chunk length and restores absolute offsets when merging
 the results. Test a short recording first, then verify a recording longer than
 five minutes on the target machine before relying on a long batch.
+
+## AI: Auto-edit
+
+Instead of selecting words by hand, click **AI: Auto-edit** after transcribing.
+ProsodyEdit sends the transcript (sentence markers plus each word's id) to an
+OpenAI-compatible chat completions endpoint and asks it to choose which words
+get emphasis (slow down + volume boost), using the same two knobs as manual
+effect groups. The response is validated, clamped to the same ranges as the
+UI (speed `0.50–0.99`, boost `0–6 dB`), deduplicated so no word is claimed
+twice, and then applied in one FFmpeg pass exactly like a manually built set
+of effect groups. The groups the AI chose are shown in the effect group list afterward
+so you can remove one and re-render if needed.
+
+This requires a Qwen Token Plan API key. Add it to the gitignored
+`prosody_gui/config.json` (see `prosody_gui/config.example.json`):
+
+```json
+{
+  "openai_api_key": "sk-...",
+  "openai_base_url": "https://portal.qwen.ai/v1",
+  "openai_model": "qwen3-max"
+}
+```
+
+`openai_base_url` defaults to the Qwen Token Plan's OpenAI-compatible
+endpoint, `https://portal.qwen.ai/v1`; point it at any other
+OpenAI-compatible endpoint to use a different provider. The key is only ever
+read from this local config file and sent as a bearer token to that endpoint.

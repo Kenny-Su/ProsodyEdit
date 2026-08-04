@@ -18,6 +18,9 @@ class AppConfig:
     qwen_device: str = "mps"
     qwen_language: str = "English"
     qwen_max_new_tokens: int = 2048
+    openai_api_key: str = ""
+    openai_base_url: str = "https://portal.qwen.ai/v1"
+    openai_model: str = "qwen3-max"
 
 
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"

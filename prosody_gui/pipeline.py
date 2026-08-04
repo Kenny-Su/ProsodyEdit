@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 import unicodedata
+import urllib.error
+import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -597,8 +599,6 @@ def slow_words(
     config: AppConfig,
     log: LogFn,
     gain_db: float = 0.0,
-    pause_before_ms: int = 0,
-    pause_after_ms: int = 0,
 ) -> dict:
     return edit_word_groups(
         name,
@@ -607,8 +607,6 @@ def slow_words(
                 "word_ids": list(word_ids),
                 "speed": speed,
                 "gain_db": gain_db,
-                "pause_before_ms": pause_before_ms,
-                "pause_after_ms": pause_after_ms,
             }
         ],
         config,
@@ -637,8 +635,6 @@ def edit_word_groups(
         try:
             speed = float(edit.get("speed", 0.95))
             gain_db = float(edit.get("gain_db", 0.0))
-            pause_before_ms = int(edit.get("pause_before_ms", 0))
-            pause_after_ms = int(edit.get("pause_after_ms", 0))
             requested = sorted(set(int(value) for value in edit.get("word_ids", [])))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid settings in effect group {edit_number}.") from exc
@@ -646,8 +642,6 @@ def edit_word_groups(
             raise ValueError("Speed must be at least 0.50 and less than 1.00.")
         if not math.isfinite(gain_db) or not 0.0 <= gain_db <= 6.0:
             raise ValueError("Volume boost must be between 0 and 6 dB.")
-        if not 0 <= pause_before_ms <= 500 or not 0 <= pause_after_ms <= 500:
-            raise ValueError("Pauses must be between 0 and 500 milliseconds.")
         if not requested:
             raise ValueError(f"Effect group {edit_number} has no selected words.")
         duplicates = assigned.intersection(requested)
@@ -671,8 +665,6 @@ def edit_word_groups(
                     "end": run[-1].end,
                     "speed": speed,
                     "gain_db": gain_db,
-                    "pause_before_ms": pause_before_ms,
-                    "pause_after_ms": pause_after_ms,
                     "word_count": len(run),
                     "edit_number": edit_number,
                 }
@@ -699,10 +691,6 @@ def edit_word_groups(
         effects = [f"atrim=start={start:.6f}:end={end:.6f}", f"atempo={chunk['speed']:.6f}"]
         if chunk["gain_db"]:
             effects.append(f"volume={chunk['gain_db']:.3f}dB")
-        if chunk["pause_before_ms"]:
-            effects.append(f"adelay=delays={chunk['pause_before_ms']}:all=1")
-        if chunk["pause_after_ms"]:
-            effects.append(f"apad=pad_dur={chunk['pause_after_ms'] / 1000:.3f}")
         add_segment(",".join(effects))
         cursor = end
     add_segment(f"atrim=start={cursor:.6f}")
@@ -726,3 +714,173 @@ def edit_word_groups(
     )
     log(f"Edited WAV ready: {rel(output)}.")
     return get_episode(name)
+
+
+AI_SYSTEM_PROMPT = """You are directing expressive prosody edits for a spoken-word \
+recording. You are given a transcript as [S<sentence>] markers followed by \
+"<word_id>:<word text>" tokens in timeline order. Decide which words deserve an \
+effect group so the delivery sounds more expressive: emphasis on important words \
+or phrases by slowing them down, optionally with a volume boost.
+
+Use effects sparingly. Most words should be left alone; only mark words where the \
+effect clearly improves delivery.
+
+Each effect group applies to one or more word ids and always has:
+- "word_ids": a list of integers from the transcript. A word id may appear in at \
+most one group. Consecutive ids in a group are treated as one continuous phrase; \
+non-consecutive ids in the same group are treated as separate occurrences that \
+share the same settings.
+- "speed": required float, 0.50 to 0.99 (exclusive of 1.0). This is how much to \
+slow the word(s) down for emphasis. Use a lower value (0.6-0.85) for strong \
+emphasis, and a value close to 0.99 when you only want the boost below without \
+noticeably slowing the word down.
+- "gain_db": optional float, 0.0 to 6.0, a volume boost for emphasis. 0 means no \
+boost. Omit or set to 0 when you don't want a boost.
+
+Respond with strict JSON only, no prose, matching exactly:
+{"groups": [{"word_ids": [int, ...], "speed": float, "gain_db": float}, ...]}
+
+Return {"groups": []} if no edits are warranted."""
+
+
+def _transcript_prompt(ep_dir: Path) -> str:
+    lines: list[str] = []
+    for sentence in parse_sentences(ep_dir):
+        tokens = " ".join(f"{word.index}:{word.text}" for word in sentence.words)
+        if tokens:
+            lines.append(f"[S{sentence.index}] {tokens}")
+    return "\n".join(lines)
+
+
+def _call_openai_chat(config: AppConfig, messages: list[dict[str, str]], log: LogFn) -> str:
+    if not config.openai_api_key:
+        raise ValueError(
+            "Set openai_api_key (your Qwen Token Plan key, with openai_base_url "
+            "if not using the default) in prosody_gui/config.json before "
+            "requesting an AI edit."
+        )
+    url = config.openai_base_url.rstrip("/") + "/chat/completions"
+    body = json.dumps(
+        {
+            "model": config.openai_model,
+            "messages": messages,
+            "temperature": 0.4,
+            "response_format": {"type": "json_object"},
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.openai_api_key}",
+        },
+    )
+    log(f"Requesting AI effect suggestions from {config.openai_model}.")
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"AI request failed ({exc.code}): {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"AI request failed: {exc.reason}") from exc
+    try:
+        return payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"Unexpected AI response shape: {payload}") from exc
+
+
+def _parse_ai_groups(content: str) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"AI response was not valid JSON: {content}") from exc
+    groups = parsed.get("groups") if isinstance(parsed, dict) else None
+    if not isinstance(groups, list):
+        raise ValueError(f"AI response was missing a 'groups' list: {content}")
+    if not all(isinstance(group, dict) for group in groups):
+        raise ValueError("Each AI effect group must be an object.")
+    return groups
+
+
+def _normalize_ai_group(group: dict[str, Any], position: int) -> dict[str, Any]:
+    try:
+        word_ids = sorted({int(value) for value in group.get("word_ids", [])})
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"group {position} has invalid word_ids") from exc
+    if not word_ids:
+        raise ValueError(f"group {position} has no word_ids")
+    try:
+        speed = float(group.get("speed", 0.9))
+        gain_db = float(group.get("gain_db", 0.0) or 0.0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"group {position} has invalid numeric settings") from exc
+    if not math.isfinite(speed):
+        raise ValueError(f"group {position} has a non-finite speed")
+    return {
+        "word_ids": word_ids,
+        "speed": round(min(0.99, max(0.5, speed)), 3),
+        "gain_db": round(min(6.0, max(0.0, gain_db)), 2),
+    }
+
+
+def _dedupe_ai_groups(groups: list[dict[str, Any]], log: LogFn) -> list[dict[str, Any]]:
+    assigned: set[int] = set()
+    deduped: list[dict[str, Any]] = []
+    for group in groups:
+        word_ids = [word_id for word_id in group["word_ids"] if word_id not in assigned]
+        dropped = len(group["word_ids"]) - len(word_ids)
+        if dropped:
+            log(f"Dropped {dropped} word id(s) already claimed by an earlier AI group.")
+        if not word_ids:
+            continue
+        assigned.update(word_ids)
+        deduped.append({**group, "word_ids": word_ids})
+    return deduped
+
+
+def ai_suggest_effects(name: str, config: AppConfig, log: LogFn) -> list[dict[str, Any]]:
+    ep_dir = display_episode_dir(name)
+    transcript = _transcript_prompt(ep_dir)
+    if not transcript:
+        raise ValueError("Transcribe the episode before requesting an AI edit.")
+    valid_ids = {word.index for word in parse_words(ep_dir)}
+    content = _call_openai_chat(
+        config,
+        [
+            {"role": "system", "content": AI_SYSTEM_PROMPT},
+            {"role": "user", "content": transcript},
+        ],
+        log,
+    )
+    raw_groups = _parse_ai_groups(content)
+
+    normalized: list[dict[str, Any]] = []
+    for position, group in enumerate(raw_groups, 1):
+        try:
+            normalized.append(_normalize_ai_group(group, position))
+        except ValueError as exc:
+            log(f"Skipping AI effect {exc}.")
+
+    for group in normalized:
+        before = len(group["word_ids"])
+        group["word_ids"] = [word_id for word_id in group["word_ids"] if word_id in valid_ids]
+        dropped = before - len(group["word_ids"])
+        if dropped:
+            log(f"Dropped {dropped} word id(s) not present in this transcript.")
+    normalized = [group for group in normalized if group["word_ids"]]
+
+    normalized = _dedupe_ai_groups(normalized, log)
+    log(f"AI suggested {len(normalized)} usable effect group(s) from {len(raw_groups)} raw group(s).")
+    return normalized
+
+
+def ai_auto_edit(name: str, config: AppConfig, log: LogFn) -> dict:
+    groups = ai_suggest_effects(name, config, log)
+    if not groups:
+        raise ValueError("The AI did not suggest any effect groups for this episode.")
+    result = edit_word_groups(name, groups, config, log)
+    result["ai_effect_groups"] = groups
+    return result

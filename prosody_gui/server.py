@@ -76,8 +76,6 @@ class Handler(BaseHTTPRequestHandler):
                     word_ids = [int(value) for value in raw_ids]
                     speed = float(payload.get("speed", 0.95))
                     gain_db = float(payload.get("gain_db", 0.0))
-                    pause_before_ms = int(payload.get("pause_before_ms", 0))
-                    pause_after_ms = int(payload.get("pause_after_ms", 0))
                 except (TypeError, ValueError) as exc:
                     raise ValueError("Invalid word selection or edit settings.") from exc
                 job = JOBS.start(
@@ -89,10 +87,12 @@ class Handler(BaseHTTPRequestHandler):
                         CONFIG,
                         j.log,
                         gain_db,
-                        pause_before_ms,
-                        pause_after_ms,
                     ),
                 )
+                return self.send_json(job_payload(job))
+            if path == "/api/ai-effects":
+                name = require_name(payload)
+                job = JOBS.start("ai-effects", lambda j: pipeline.ai_auto_edit(name, CONFIG, j.log))
                 return self.send_json(job_payload(job))
             return self.send_error_json(HTTPStatus.NOT_FOUND, "Not found.")
         except Exception as exc:  # noqa: BLE001 - API error response
