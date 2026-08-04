@@ -5,6 +5,6 @@
   "qwen_language": "English",
   "qwen_max_new_tokens": 2048,
   "openai_api_key": "",
-  "openai_base_url": "https://portal.qwen.ai/v1",
-  "openai_model": "qwen3-max"
+  "openai_base_url": "https://api.openai.com/v1",
+  "openai_model": "gpt-4o-mini"
 }

@@ -2,16 +2,20 @@
 __pycache__/
 *.py[cod]
 .venv/
+*.egg-info/
+build/
+dist/
+
+# Per-machine configuration (copy config.example.json to get started)
+/config.json
 
 # Optional repository-local model downloads
 models/Qwen3-ASR-*/
 models/Qwen3-ForcedAligner-*/
 
-# Local source and preview audio
+# Local source and rendered audio, and edit logs
 *.mp3
 *.wav
 *.flac
 *.m4a
-
-# Per-machine GUI configuration
-prosody_gui/config.json
+*.edit_log.json
