@@ -6,10 +6,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-STATIC_DIR = Path(__file__).resolve().parent / "static"
-
-
 @dataclass
 class AppConfig:
     ffmpeg: str = shutil.which("ffmpeg") or "ffmpeg"

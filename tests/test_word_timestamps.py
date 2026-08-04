@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from prosody_gui import pipeline, server
+from prosody_gui import pipeline
 from prosody_gui.config import AppConfig
 
 
@@ -171,10 +171,7 @@ class WordTimestampTests(unittest.TestCase):
         self.assertNotIn("generated_groups", episode)
         self.assertNotIn("final", episode)
 
-    def test_upload_filename_is_sanitized_and_displayed(self) -> None:
-        self.assertEqual(server.decode_upload_filename("..%2FMy%20Episode.wav"), "My Episode.wav")
-        with self.assertRaisesRegex(ValueError, "WAV file"):
-            server.decode_upload_filename("notes.mp3")
+    def test_import_wav_sanitizes_name_and_keeps_display_name(self) -> None:
         source = self.output_dir / "source.wav"
         source.write_bytes(b"wav")
         imported = pipeline.import_wav(source, "friendly_internal", lambda _message: None, display_name="Friendly Episode")

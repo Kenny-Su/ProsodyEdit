@@ -1,8 +1,10 @@
 # ProsodyEdit
 
-ProsodyEdit is a local GUI for inspecting sentence- and word-level timestamps
-produced by Qwen3-ASR and Qwen3-ForcedAligner. Upload a WAV, transcribe it,
-inspect every timed unit, and click a tile to hear its exact aligned interval.
+ProsodyEdit is a local, fully automated command-line pipeline: give it a WAV,
+it transcribes the audio with Qwen3-ASR and Qwen3-ForcedAligner, asks an AI
+model which words deserve expressive emphasis, and renders an edited WAV plus
+a JSON edit log describing exactly what changed. The original file is never
+modified; a bad AI call just produces a render you can discard.
 
 ## Requirements
 
@@ -20,7 +22,7 @@ brew install python@3.12 ffmpeg
 
 ## Model environment
 
-Create a dedicated environment for both the GUI server and Qwen inference.
+Create a dedicated environment for Qwen inference.
 
 ```bash
 python3.12 -m venv .venv
@@ -37,20 +39,25 @@ in this repository.
 ## Run
 
 ```bash
-.venv/bin/python run_gui.py
+.venv/bin/python run_auto.py path/to/episode.wav
 ```
 
-You may also run `python run_gui.py`; the launcher detects an interpreter
+You may also run `python run_auto.py ...`; the launcher detects an interpreter
 outside the project environment and restarts itself with `.venv/bin/python`.
+Pass `--name` to control the output folder name; it defaults to the input
+file's stem.
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765), upload a short WAV, and
-click **Transcribe**. This is also the recommended first-run smoke test before
-processing a long recording. Progress, command output, and full error details
-are written to the terminal that started the GUI.
+Progress, command output, and full error details are printed to the terminal.
+Output is written under `~/Downloads/ProsodyEdit-output/<name>/`:
 
-The first launch creates the ignored `prosody_gui/config.json`. The server
-loads both models lazily on the first transcription and reuses them for later
-jobs. Defaults are:
+- `original.wav` — an untouched copy of the input
+- `edited.wav` — the rendered result
+- `edit_log.json` — the effect groups the AI chose, with the affected word
+  text, speed, and gain for each
+
+The first run creates the ignored `prosody_gui/config.json`. Models load
+lazily on first use and are reused for later runs in the same process.
+Defaults are:
 
 - ASR: `Qwen/Qwen3-ASR-1.7B`
 - Forced aligner: `Qwen/Qwen3-ForcedAligner-0.6B`
@@ -63,53 +70,29 @@ or inference fails, ProsodyEdit logs the error, releases the MPS model, and
 retries the complete job on CPU with float32. CPU inference can be substantially
 slower.
 
-## Timestamp inspection
-
-Qwen's forced aligner supplies text, start time, and end time, but no alignment
-confidence. The GUI therefore reports timestamp coverage instead of inventing
-a score. It displays timestamps to millisecond precision and creates exact WAV
-previews for every sentence and timed unit.
-
-The native Qwen `ASRTranscription` and `ForcedAlignResult` objects remain in
-memory for the lifetime of the server. ProsodyEdit does not export or maintain
-a transcript JSON file. Uploading a new WAV or stopping the server discards the
-in-memory transcript.
-
 ## Word-level slowdown
 
-After transcription, select any words with their checkboxes, choose a speed
-from `0.50` to `0.99`, and an optional `0–6 dB` volume boost. ProsodyEdit
-applies FFmpeg `atempo` and `volume`, then concatenates the result in
-timeline order. Consecutive selected words are merged from the first word's
-start to the last word's end. Nonconsecutive selections remain separate
-chunks, and all audio between those chunks is unchanged.
-
-Click **Add effect group** to save those settings, then select another set of
-words and add a group with different values. A word may belong to only one
-group. Review or remove groups from the list, then click **Create edited WAV**
-to apply every group in one timeline-ordered FFmpeg export.
+Emphasis is applied per selected word run: a speed from `0.50` to `0.99` and
+an optional `0–6 dB` volume boost. ProsodyEdit applies FFmpeg `atempo` and
+`volume`, then concatenates the result in timeline order. Consecutive selected
+words are merged from the first word's start to the last word's end.
+Nonconsecutive selections remain separate chunks, and all audio between those
+chunks is unchanged. A word may belong to only one effect group.
 The edited episode becomes longer by the added duration of the slowed words.
-
-Use the Edited player to review the result or click **Download WAV**. Creating
-another edit replaces the previous temporary `edited.wav`; the browser receives
-a cache-busted URL for the newest version.
 
 The official Qwen wrapper automatically splits long audio to the forced
 aligner's supported chunk length and restores absolute offsets when merging
 the results. Test a short recording first, then verify a recording longer than
 five minutes on the target machine before relying on a long batch.
 
-## AI: Auto-edit
+## AI auto-edit
 
-Instead of selecting words by hand, click **AI: Auto-edit** after transcribing.
 ProsodyEdit sends the transcript (sentence markers plus each word's id) to an
 OpenAI-compatible chat completions endpoint and asks it to choose which words
-get emphasis (slow down + volume boost), using the same two knobs as manual
-effect groups. The response is validated, clamped to the same ranges as the
-UI (speed `0.50–0.99`, boost `0–6 dB`), deduplicated so no word is claimed
-twice, and then applied in one FFmpeg pass exactly like a manually built set
-of effect groups. The groups the AI chose are shown in the effect group list afterward
-so you can remove one and re-render if needed.
+get emphasis (slow down + volume boost), using the same two knobs as a manual
+effect group. The response is validated, clamped to the same ranges described
+above (speed `0.50–0.99`, boost `0–6 dB`), deduplicated so no word is claimed
+twice, and then applied in one FFmpeg pass.
 
 This requires a Qwen Token Plan API key. Add it to the gitignored
 `prosody_gui/config.json` (see `prosody_gui/config.example.json`):

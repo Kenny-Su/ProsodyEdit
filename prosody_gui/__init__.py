@@ -1,1 +1,1 @@
-"""Local GUI package for the ProsodyEdit workflow."""
+"""Transcription and prosody-editing pipeline for ProsodyEdit."""
