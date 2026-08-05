@@ -8,15 +8,20 @@ import urllib.request
 from typing import Any
 
 from .config import Config
-from .transcript import Sentence
+from .transcript import Word
 
 logger = logging.getLogger(__name__)
 
+WORDS_PER_LINE = 40
+
 SYSTEM_PROMPT = """You are directing expressive prosody edits for a spoken-word \
-recording. You are given a transcript as [S<sentence>] markers followed by \
-"<word_id>:<word text>" tokens in timeline order. Decide which words deserve an \
-effect group so the delivery sounds more expressive: emphasis on important words \
-or phrases by slowing them down, optionally with a volume boost.
+recording. You are given a transcript as "<word_id>:<word text>" tokens in \
+timeline order, wrapped to one line per several dozen words purely for \
+readability; the line breaks carry no meaning. Sentence-ending punctuation is \
+attached to the word it follows, so use it to read sentence and phrase \
+boundaries yourself. Decide which words deserve an effect group so the \
+delivery sounds more expressive: emphasis on important words or phrases by \
+slowing them down, optionally with a volume boost.
 
 Use effects sparingly. Most words should be left alone; only mark words where the \
 effect clearly improves delivery.
@@ -39,12 +44,9 @@ Respond with strict JSON only, no prose, matching exactly:
 Return {"groups": []} if no edits are warranted."""
 
 
-def _transcript_prompt(sentences: list[Sentence]) -> str:
-    lines: list[str] = []
-    for sentence in sentences:
-        tokens = " ".join(f"{word.index}:{word.text}" for word in sentence.words)
-        if tokens:
-            lines.append(f"[S{sentence.index}] {tokens}")
+def _transcript_prompt(words: list[Word]) -> str:
+    tokens = [f"{word.index}:{word.text}" for word in words]
+    lines = [" ".join(tokens[i : i + WORDS_PER_LINE]) for i in range(0, len(tokens), WORDS_PER_LINE)]
     return "\n".join(lines)
 
 
@@ -137,11 +139,11 @@ def _dedupe_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
-def suggest_effects(sentences: list[Sentence], config: Config) -> list[dict[str, Any]]:
-    transcript = _transcript_prompt(sentences)
+def suggest_effects(words: list[Word], config: Config) -> list[dict[str, Any]]:
+    transcript = _transcript_prompt(words)
     if not transcript:
         raise ValueError("No transcript available; nothing to suggest edits for.")
-    valid_ids = {word.index for sentence in sentences for word in sentence.words}
+    valid_ids = {word.index for word in words}
     content = _call_chat(
         config,
         [

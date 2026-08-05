@@ -9,10 +9,10 @@ from prosodyedit.config import Config
 from prosodyedit.transcript import Word
 
 WORDS = [
-    Word(index=1, sentence_index=1, start=1.0, end=1.3, text="Make"),
-    Word(index=2, sentence_index=1, start=1.35, end=1.65, text="this"),
-    Word(index=3, sentence_index=1, start=1.7, end=2.2, text="count."),
-    Word(index=4, sentence_index=2, start=3.1, end=3.7, text="Again."),
+    Word(index=1, start=1.0, end=1.3, text="Make"),
+    Word(index=2, start=1.35, end=1.65, text="this"),
+    Word(index=3, start=1.7, end=2.2, text="count."),
+    Word(index=4, start=3.1, end=3.7, text="Again."),
 ]
 
 

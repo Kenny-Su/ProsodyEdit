@@ -6,34 +6,28 @@ from unittest.mock import patch
 
 from prosodyedit import ai
 from prosodyedit.config import Config
-from prosodyedit.transcript import Sentence, Word
+from prosodyedit.transcript import Word
 
-SENTENCES = [
-    Sentence(
-        index=1,
-        start=1.0,
-        end=2.2,
-        text="Make this count.",
-        words=[
-            Word(index=1, sentence_index=1, start=1.0, end=1.3, text="Make"),
-            Word(index=2, sentence_index=1, start=1.35, end=1.65, text="this"),
-            Word(index=3, sentence_index=1, start=1.7, end=2.2, text="count."),
-        ],
-    ),
-    Sentence(
-        index=2,
-        start=3.1,
-        end=3.7,
-        text="Again.",
-        words=[Word(index=4, sentence_index=2, start=3.1, end=3.7, text="Again.")],
-    ),
+WORDS = [
+    Word(index=1, start=1.0, end=1.3, text="Make"),
+    Word(index=2, start=1.35, end=1.65, text="this"),
+    Word(index=3, start=1.7, end=2.2, text="count."),
+    Word(index=4, start=3.1, end=3.7, text="Again."),
 ]
 
 
 class TranscriptPromptTests(unittest.TestCase):
-    def test_includes_sentence_markers_and_word_ids(self) -> None:
-        prompt = ai._transcript_prompt(SENTENCES)
-        self.assertEqual(prompt, "[S1] 1:Make 2:this 3:count.\n[S2] 4:Again.")
+    def test_includes_word_ids_in_timeline_order(self) -> None:
+        prompt = ai._transcript_prompt(WORDS)
+        self.assertEqual(prompt, "1:Make 2:this 3:count. 4:Again.")
+
+    def test_wraps_long_transcripts_across_lines(self) -> None:
+        words = [Word(index=i, start=float(i), end=float(i) + 0.5, text=f"word{i}") for i in range(1, 85)]
+        prompt = ai._transcript_prompt(words)
+        lines = prompt.split("\n")
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(len(lines[0].split()), ai.WORDS_PER_LINE)
+        self.assertEqual(len(lines[-1].split()), 4)
 
 
 class NormalizeGroupTests(unittest.TestCase):
@@ -67,7 +61,7 @@ class SuggestEffectsTests(unittest.TestCase):
     def test_drops_hallucinated_word_ids(self) -> None:
         content = json.dumps({"groups": [{"word_ids": [1, 99], "speed": 0.8, "gain_db": 2.0}]})
         with patch.object(ai, "_call_chat", return_value=content) as mock_call:
-            groups = ai.suggest_effects(SENTENCES, Config(openai_api_key="key"))
+            groups = ai.suggest_effects(WORDS, Config(openai_api_key="key"))
 
         mock_call.assert_called_once()
         self.assertEqual(groups, [{"word_ids": [1], "speed": 0.8, "gain_db": 2.0}])

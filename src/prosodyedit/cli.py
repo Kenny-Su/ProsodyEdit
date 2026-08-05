@@ -8,13 +8,13 @@ from pathlib import Path
 from .ai import suggest_effects
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .editing import apply_effect_groups
-from .transcript import join_units, parse_sentences, transcribe
+from .transcript import Word, join_units, parse_words, transcribe
 
 logger = logging.getLogger(__name__)
 
 
-def _build_edit_log(sentences, groups: list[dict]) -> list[dict]:
-    words_by_id = {word.index: word for sentence in sentences for word in sentence.words}
+def _build_edit_log(words: list[Word], groups: list[dict]) -> list[dict]:
+    words_by_id = {word.index: word for word in words}
     entries = []
     for group in groups:
         matched = [words_by_id[i] for i in group["word_ids"] if i in words_by_id]
@@ -60,10 +60,9 @@ def main(argv: list[str] | None = None) -> None:
 
     logger.info("Transcribing %s", args.audio)
     result = transcribe(args.audio, config)
-    sentences = parse_sentences(result)
-    words = [word for sentence in sentences for word in sentence.words]
+    words = parse_words(result)
 
-    groups = suggest_effects(sentences, config)
+    groups = suggest_effects(words, config)
     if not groups:
         raise SystemExit("The AI did not suggest any effect groups for this recording.")
 
@@ -72,7 +71,7 @@ def main(argv: list[str] | None = None) -> None:
 
     log_path = output_dir / f"{stem}.edit_log.json"
     log_path.write_text(
-        json.dumps(_build_edit_log(sentences, groups), indent=2, ensure_ascii=False),
+        json.dumps(_build_edit_log(words, groups), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 

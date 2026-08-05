@@ -68,15 +68,15 @@ Output, next to the input file by default:
    `ForcedAlignResult` items (`text`, `start_time`, `end_time`) are the
    timestamp source of truth; items with empty text, non-finite timestamps,
    negative starts, or `end <= start` are excluded.
-3. Group aligned words into sentences at `.`, `?`, `!`, `。`, `？`, and `！`,
-   using the ASR's own punctuation to derive boundaries so that abbreviations
-   and initials (e.g. "Mr.", "H.W.") don't split a sentence early.
-4. Send a compact transcript (`[S<n>] <word_id>:<text>` per sentence) to the
-   OpenAI-compatible endpoint, asking for `{"groups": [...]}` — each group a
-   list of word ids plus a `speed` (`0.50`-`0.99`) and optional `gain_db`
-   (`0`-`6`) for emphasis. The response is validated, clamped to those ranges,
-   and deduplicated so no word id is claimed by more than one group.
-5. Render the edit: consecutive selected word indexes are merged into one
+3. Send the transcript as `<word_id>:<text>` tokens in timeline order (wrapped
+   to one line per 40 words purely for readability) to the OpenAI-compatible
+   endpoint, asking for `{"groups": [...]}` — each group a list of word ids
+   plus a `speed` (`0.50`-`0.99`) and optional `gain_db` (`0`-`6`) for
+   emphasis. Sentence-ending punctuation stays attached to each word, so the
+   model reads phrase and sentence boundaries itself; there's no separate
+   sentence-detection step. The response is validated, clamped to those
+   ranges, and deduplicated so no word id is claimed by more than one group.
+4. Render the edit: consecutive selected word indexes are merged into one
    interval from the first word's start through the last word's end, then
    processed with FFmpeg `atempo` and `volume`. Nonconsecutive selections
    remain separate chunks; audio outside any chunk is untouched. All chunks
