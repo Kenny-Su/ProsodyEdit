@@ -5,11 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "prosodyedit"
 version = "0.1.0"
-description = "Transcribe a WAV, ask an AI which words deserve emphasis, and render an edited WAV."
+description = "Ask an AI which words in a pre-transcribed recording deserve emphasis, and render an edited WAV."
 requires-python = ">=3.12"
-dependencies = [
-    "qwen-asr",
-]
+dependencies = []
 
 [project.scripts]
 prosodyedit = "prosodyedit.cli:main"

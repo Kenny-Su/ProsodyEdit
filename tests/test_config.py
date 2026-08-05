@@ -17,9 +17,8 @@ class LoadConfigTests(unittest.TestCase):
     def test_overrides_defaults_from_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
-            path.write_text(json.dumps({"qwen_device": "cpu", "openai_model": "custom"}), encoding="utf-8")
+            path.write_text(json.dumps({"openai_model": "custom"}), encoding="utf-8")
             config = load_config(path)
-        self.assertEqual(config.qwen_device, "cpu")
         self.assertEqual(config.openai_model, "custom")
 
     def test_falls_back_to_environment_variable_for_api_key(self) -> None:

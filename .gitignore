@@ -9,10 +9,6 @@ dist/
 # Per-machine configuration (copy config.example.json to get started)
 /config.json
 
-# Optional repository-local model downloads
-models/Qwen3-ASR-*/
-models/Qwen3-ForcedAligner-*/
-
 # Local source and rendered audio, and edit logs
 *.mp3
 *.wav

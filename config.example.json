@@ -1,9 +1,4 @@
 {
-  "qwen_asr_model": "Qwen/Qwen3-ASR-1.7B",
-  "qwen_aligner_model": "Qwen/Qwen3-ForcedAligner-0.6B",
-  "qwen_device": "mps",
-  "qwen_language": "English",
-  "qwen_max_new_tokens": 2048,
   "openai_api_key": "",
   "openai_base_url": "https://api.openai.com/v1",
   "openai_model": "gpt-4o-mini"
