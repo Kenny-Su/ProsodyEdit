@@ -62,7 +62,6 @@ def _call_chat(config: Config, messages: list[dict[str, str]]) -> str:
         {
             "model": config.openai_model,
             "messages": messages,
-            "temperature": 0.4,
             "response_format": {"type": "json_object"},
         }
     ).encode("utf-8")
