@@ -73,6 +73,7 @@ def _call_chat(config: Config, messages: list[dict[str, str]]) -> str:
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {config.openai_api_key}",
+            "User-Agent": "Mozilla/5.0",
         },
     )
     logger.info("Requesting AI effect suggestions from %s.", config.openai_model)
