@@ -58,8 +58,8 @@ input file). Pass `--config` to use a config file at a non-default path.
 Output, next to the input file by default:
 
 - `episode.edited.wav` — the rendered result
-- `episode.edit_log.json` — the effect groups the AI chose, with the affected
-  word text, speed, and gain for each
+- `episode.edit_log.json` — the full transcribed word list plus the effect
+  groups the AI chose (word ids, speed, and gain for each)
 
 ## How it works
 

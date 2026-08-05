@@ -3,30 +3,22 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from dataclasses import asdict
 from pathlib import Path
 
 from .ai import suggest_effects
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .editing import apply_effect_groups
-from .transcript import Word, join_units, parse_words, transcribe
+from .transcript import Word, parse_words, transcribe
 
 logger = logging.getLogger(__name__)
 
 
-def _build_edit_log(words: list[Word], groups: list[dict]) -> list[dict]:
-    words_by_id = {word.index: word for word in words}
-    entries = []
-    for group in groups:
-        matched = [words_by_id[i] for i in group["word_ids"] if i in words_by_id]
-        entries.append(
-            {
-                "text": join_units(word.text for word in matched),
-                "word_ids": group["word_ids"],
-                "speed": group["speed"],
-                "gain_db": group["gain_db"],
-            }
-        )
-    return entries
+def _build_edit_log(words: list[Word], groups: list[dict]) -> dict:
+    return {
+        "words": [asdict(word) for word in words],
+        "groups": groups,
+    }
 
 
 def main(argv: list[str] | None = None) -> None:

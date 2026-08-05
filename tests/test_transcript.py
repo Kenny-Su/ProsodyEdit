@@ -46,14 +46,6 @@ class ParseWordsTests(unittest.TestCase):
         self.assertEqual([(word.start, word.end) for word in words], [(299.2, 299.8), (300.4, 301.0)])
 
 
-class JoinUnitsTests(unittest.TestCase):
-    def test_joins_with_spaces_and_respects_punctuation(self) -> None:
-        self.assertEqual(transcript.join_units(["Make", "this", "count."]), "Make this count.")
-
-    def test_joins_cjk_without_spaces(self) -> None:
-        self.assertEqual(transcript.join_units(["你好", "世界。"]), "你好世界。")
-
-
 class TranscribeTests(unittest.TestCase):
     def test_mps_failure_retries_on_cpu(self) -> None:
         calls: list[str] = []

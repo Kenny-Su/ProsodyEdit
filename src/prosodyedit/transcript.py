@@ -3,10 +3,9 @@ from __future__ import annotations
 import logging
 import math
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .config import Config
 
@@ -15,10 +14,6 @@ logger = logging.getLogger(__name__)
 # Must be set before the lazy torch import performed during transcription.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-NO_LEADING_SPACE_RE = re.compile(r"^[,.;:!?%。，、；：！？）】》”’]")
-NO_TRAILING_SPACE_RE = re.compile(r"[（【《“‘/]$")
-CJK_RE = re.compile(r"[㐀-鿿぀-ヿ가-힯]")
-
 
 @dataclass
 class Word:
@@ -26,23 +21,6 @@ class Word:
     start: float
     end: float
     text: str
-
-
-def join_units(units: Iterable[str]) -> str:
-    text = ""
-    for raw in units:
-        unit = raw.strip()
-        if not unit:
-            continue
-        if not text:
-            text = unit
-        elif NO_LEADING_SPACE_RE.search(unit) or NO_TRAILING_SPACE_RE.search(text):
-            text += unit
-        elif CJK_RE.search(unit) or CJK_RE.search(text[-1:]):
-            text += unit
-        else:
-            text += " " + unit
-    return text
 
 
 def _field(value: Any, name: str, default: Any = None) -> Any:
