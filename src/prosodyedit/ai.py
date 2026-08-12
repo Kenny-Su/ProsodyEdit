@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import urllib.error
 import urllib.request
 from typing import Any
@@ -14,32 +13,33 @@ logger = logging.getLogger(__name__)
 
 WORDS_PER_LINE = 40
 
-SYSTEM_PROMPT = """You are directing expressive prosody edits for a spoken-word \
+DEFAULT_SPEED = 0.9
+DEFAULT_GAIN_DB = 5.0
+
+SYSTEM_PROMPT = """You are directing prosody edits for an educational spoken-word \
 recording. You are given a transcript as "<word_id>:<word text>" tokens in \
 timeline order, wrapped to one line per several dozen words purely for \
 readability; the line breaks carry no meaning. Sentence-ending punctuation is \
 attached to the word it follows, so use it to read sentence and phrase \
-boundaries yourself. Decide which words deserve an effect group so the \
-delivery sounds more expressive: emphasis on important words or phrases by \
-slowing them down, optionally with a volume boost.
+boundaries yourself. Decide which words or short phrases deserve emphasis to \
+help listeners notice information that is important for understanding the \
+passage. Prioritize key concepts, causal or logical relationships, important \
+contrasts or qualifications, and conclusions or implications. Do not select \
+words merely because they are names, numbers, or technical terms.
 
-Use effects sparingly. Most words should be left alone; only mark words where the \
-effect clearly improves delivery.
+Use emphasis sparingly. Most words should be left alone; only mark words where \
+it clearly helps direct attention to important information. Prefer short \
+phrases rather than whole sentences. Emphasis is binary: a word is either \
+emphasized or not, so only mark the words that truly deserve it.
 
-Each effect group applies to one or more word ids and always has:
+Each group applies to one or more word ids and has:
 - "word_ids": a list of integers from the transcript. A word id may appear in at \
 most one group. Consecutive ids in a group are treated as one continuous phrase; \
 non-consecutive ids in the same group are treated as separate occurrences that \
-share the same settings.
-- "speed": required float, 0.50 to 0.99 (exclusive of 1.0). This is how much to \
-slow the word(s) down for emphasis. Use a lower value (0.6-0.85) for strong \
-emphasis, and a value close to 0.99 when you only want the boost below without \
-noticeably slowing the word down.
-- "gain_db": optional float, 0.0 to 6.0, a volume boost for emphasis. 0 means no \
-boost. Omit or set to 0 when you don't want a boost.
+should be emphasized.
 
 Respond with strict JSON only, no prose, matching exactly:
-{"groups": [{"word_ids": [int, ...], "speed": float, "gain_db": float}, ...]}
+{"groups": [{"word_ids": [int, ...]}, ...]}
 
 Return {"groups": []} if no edits are warranted."""
 
@@ -110,17 +110,10 @@ def _normalize_group(group: dict[str, Any], position: int) -> dict[str, Any]:
         raise ValueError(f"group {position} has invalid word_ids") from exc
     if not word_ids:
         raise ValueError(f"group {position} has no word_ids")
-    try:
-        speed = float(group.get("speed", 0.9))
-        gain_db = float(group.get("gain_db", 0.0) or 0.0)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"group {position} has invalid numeric settings") from exc
-    if not math.isfinite(speed):
-        raise ValueError(f"group {position} has a non-finite speed")
     return {
         "word_ids": word_ids,
-        "speed": round(min(0.99, max(0.5, speed)), 3),
-        "gain_db": round(min(6.0, max(0.0, gain_db)), 2),
+        "speed": DEFAULT_SPEED,
+        "gain_db": DEFAULT_GAIN_DB,
     }
 
 
