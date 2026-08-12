@@ -2,9 +2,6 @@
 __pycache__/
 *.py[cod]
 .venv/
-*.egg-info/
-build/
-dist/
 
 # Per-machine configuration (copy config.example.json to get started)
 /config.json
@@ -14,4 +11,4 @@ dist/
 *.wav
 *.flac
 *.m4a
-*.edit_log.json
+edit_log.json
