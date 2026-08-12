@@ -15,24 +15,33 @@ import sys
 import urllib.request
 from pathlib import Path
 
-SPEED = 0.9  # emphasized words are stretched to this fraction of their tempo
-GAIN_DB = 5.0  # ...and boosted by this much
+SPEED = 0.8  # emphasized words are stretched to this fraction of their tempo
+CONTRAST_DB = 10.0  # ...and stand this much above the rest of the recording
+
+# The contrast is applied by ducking everything else rather than by boosting the
+# emphasized words: source recordings are usually mastered near 0 dBFS, so a
+# boost would hard-clip the very words it is meant to highlight.
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
 SYSTEM_PROMPT = """You are directing prosody edits for an educational spoken-word \
 recording. You are given a transcript as "<word_id>:<word text>" tokens in timeline \
-order. Sentence-ending punctuation is attached to the word it follows, so use it to \
-read sentence and phrase boundaries yourself. Decide which words deserve emphasis to \
-help listeners notice information that is important for understanding the passage. \
-Prioritize key concepts, causal or logical relationships, important contrasts or \
-qualifications, and conclusions or implications. Do not select words merely because \
-they are names, numbers, or technical terms.
+order. The transcript comes from a forced aligner and carries no punctuation or \
+capitalization, so infer sentence and phrase boundaries from the wording itself. \
+Decide which words deserve emphasis to help listeners notice information that is \
+important for understanding the passage. Prioritize key concepts, causal or logical \
+relationships, important contrasts or qualifications, and conclusions or \
+implications. Do not select words merely because they are names, numbers, or \
+technical terms.
 
 Use emphasis sparingly. Most words should be left alone; only mark words where it \
-clearly helps direct attention to important information. Prefer short phrases rather \
-than whole sentences. Emphasis is binary: a word is either emphasized or not, so only \
-mark the words that truly deserve it.
+clearly helps direct attention to important information. Emphasis is binary: a word \
+is either emphasized or not, so only mark the words that truly deserve it.
+
+Consecutive ids are rendered as one continuous stretch of emphasized speech, so \
+never mark more than three consecutive ids. Within a longer important phrase, mark \
+only the one or two words a speaker would actually stress, and leave out articles, \
+prepositions, and auxiliary verbs such as "the", "of", "to", and "be".
 
 Respond with strict JSON only, no prose, matching exactly:
 {"word_ids": [int, ...]}
@@ -81,7 +90,7 @@ def spans(words, chosen):
 
 
 def render(source, output, emphasis):
-    """Slow and boost each span, passing the rest of the audio through untouched."""
+    """Slow each span, ducking the audio between spans to make them stand out."""
     filters, labels = [], []
 
     def part(expression):
@@ -91,10 +100,10 @@ def render(source, output, emphasis):
     cursor = 0.0
     for start, end in emphasis:
         if start > cursor:
-            part(f"atrim=start={cursor:.3f}:end={start:.3f}")
-        part(f"atrim=start={start:.3f}:end={end:.3f},atempo={SPEED},volume={GAIN_DB}dB")
+            part(f"atrim=start={cursor:.3f}:end={start:.3f},volume=-{CONTRAST_DB}dB")
+        part(f"atrim=start={start:.3f}:end={end:.3f},atempo={SPEED}")
         cursor = end
-    part(f"atrim=start={cursor:.3f}")
+    part(f"atrim=start={cursor:.3f},volume=-{CONTRAST_DB}dB")
     graph = ";".join(filters + [f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[out]"])
 
     subprocess.run(
