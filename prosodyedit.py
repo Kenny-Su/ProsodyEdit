@@ -16,7 +16,7 @@ import urllib.request
 from pathlib import Path
 
 SPEED = 0.8  # emphasized words are stretched to this fraction of their tempo
-CONTRAST_DB = 10.0  # ...and stand this much above the rest of the recording
+CONTRAST_DB = 5.0  # ...and stand this much above the rest of the recording
 
 # The contrast is applied by ducking everything else rather than by boosting the
 # emphasized words: source recordings are usually mastered near 0 dBFS, so a
@@ -38,10 +38,11 @@ Use emphasis sparingly. Most words should be left alone; only mark words where i
 clearly helps direct attention to important information. Emphasis is binary: a word \
 is either emphasized or not, so only mark the words that truly deserve it.
 
-Consecutive ids are rendered as one continuous stretch of emphasized speech, so \
-never mark more than three consecutive ids. Within a longer important phrase, mark \
-only the one or two words a speaker would actually stress, and leave out articles, \
-prepositions, and auxiliary verbs such as "the", "of", "to", and "be".
+Consecutive ids are rendered as one continuous stretch of emphasized speech. \
+Prefer short contiguous phrases when several adjacent words together express an \
+important idea. Do not split a meaningful phrase merely to exclude articles, \
+prepositions, or auxiliary verbs. Keep emphasized stretches short and avoid whole \
+clauses or sentences.
 
 Respond with strict JSON only, no prose, matching exactly:
 {"word_ids": [int, ...]}
@@ -63,6 +64,9 @@ def select_emphasis(words):
                     {"role": "user", "content": transcript},
                 ],
                 "response_format": {"type": "json_object"},
+                # Qwen3 models think by default; the reasoning pass can outrun
+                # the read timeout (and burns tokens) on a long transcript.
+                "enable_thinking": False,
             }
         ).encode(),
         headers={
