@@ -1,14 +1,8 @@
 .DS_Store
 __pycache__/
 *.py[cod]
-.venv/
-
-# Per-machine configuration (copy config.example.json to get started)
 /config.json
-
-# Local source and rendered audio, and edit logs
 *.mp3
 *.wav
-*.flac
-*.m4a
-edit_log.json
+alignment.json
+emphasis_plan.json

@@ -1,0 +1,8 @@
+name: cosyvoice
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - montreal-forced-aligner=3.3.9
+  - ffmpeg
+  - praatio>=6.2,<7

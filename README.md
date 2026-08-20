@@ -1,48 +1,59 @@
 # ProsodyEdit
 
-ProsodyEdit asks an LLM which words in a spoken recording deserve emphasis, then
-renders those words slower and louder. It is a single dependency-free Python
-script, written as the software attachment to an HCI paper.
+ProsodyEdit compares two ways to emphasize the same words in an English narration:
 
-## Requirements
+- `audio.edited.wav`: slow selected spans to 0.95× and add 2 dB.
+- `audio.cosyvoice.wav`: regenerate selected sentences with Fun-CosyVoice 3.
 
-Python 3.12 and FFmpeg on `PATH`:
+The pipeline is deliberately small: MFA aligns the transcript, an
+OpenAI-compatible model selects `word_ids`, and both interventions consume that
+same plan.
+
+## Environment
+
+Install `~/CosyVoice` and its requirements following the upstream repository,
+then add ProsodyEdit's alignment dependencies to that environment:
 
 ```bash
-brew install python@3.12 ffmpeg
+conda env update -n cosyvoice -f environment.yml
+conda activate cosyvoice
+mfa model download acoustic english_us_arpa
+mfa model download dictionary english_us_arpa
+mfa model download g2p english_us_arpa
 ```
 
-Copy `config.example.json` to `config.json` and fill in `openai_api_key`.
-`openai_base_url` may point at any OpenAI-compatible endpoint. `config.json` is
-gitignored.
+Copy `config.example.json` to `config.json` and fill in the API key. Change
+`cosyvoice_root` only if the repository is not at `~/CosyVoice`. `config.json`
+is ignored by Git.
+
+## Input
+
+Each input directory contains:
+
+```text
+audio.wav   clean mono English narration, at least 16 kHz
+script.txt  verbatim transcript
+```
+
+Punctuation defines sentence boundaries. The tokenizer intentionally assumes
+controlled research transcripts: use whitespace between words and spell numbers
+as they are spoken. Each sentence must be at most 30 seconds because it becomes
+a CosyVoice reference clip.
 
 ## Run
 
 ```bash
-python3 prosodyedit.py path/to/input_dir
+python prosodyedit.py INPUT_DIR
 ```
 
-The input directory holds:
+The first run writes `alignment.json` and `emphasis_plan.json`; later runs reuse
+them so the experimental condition stays fixed. When the input changes, delete
+both files. To repeat only planning, delete `emphasis_plan.json`.
+The saved plan is the experimental manipulation and should be inspected before
+analysis.
 
-- `audio.wav` — the source recording
-- `timestamp.json` — a forced aligner's flat list of
-  `{"text", "start_time", "end_time"}` words in timeline order
-
-ProsodyEdit writes `audio.edited.wav` and `edit_log.json` beside them, and never
-modifies the originals.
-
-## How it works
-
-1. The transcript is sent as `<word_id>:<text>` tokens in timeline order.
-   Sentence-ending punctuation stays attached to each word, so the model reads
-   phrase and sentence boundaries itself, and replies with `{"word_ids": [...]}`
-   — the words worth emphasizing.
-2. Emphasis is binary: every selected word is slowed to `0.9x` and boosted by
-   `5 dB` (`SPEED` and `GAIN_DB` at the top of the script). Runs of consecutive
-   selected words become one continuous span, so a phrase is stretched as a
-   unit rather than word by word.
-3. The spans and the untouched audio between them are rendered in one FFmpeg
-   pass. The edited recording is longer than the input by the time added to the
-   slowed words.
-
-`edit_log.json` is the full word list with an `emphasized` flag on each word.
+For every selected sentence, CosyVoice receives that sentence's original audio
+as its voice reference. Selected phrases are wrapped in `<strong>` and repeated
+in an `inference_instruct2` instruction asking for slower, louder, more prominent
+delivery. The sampling seed is fixed at 1986. Generated audio is resampled and
+spliced into the original recording without loudness normalization.
